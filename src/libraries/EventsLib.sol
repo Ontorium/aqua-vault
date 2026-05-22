@@ -65,11 +65,12 @@ library EventsLib {
     event SetSendSharesGate(address indexed newSendSharesGate);
     event SetReceiveAssetsGate(address indexed newReceiveAssetsGate);
     event SetSendAssetsGate(address indexed newSendAssetsGate);
+    event SetPriceManager(address indexed newPriceManager);
     event SetStrategyRegistry(address indexed newStrategyRegistry);
     event AddStrategy(address indexed account);
     event RemoveStrategy(address indexed account);
     event SetGovernanceTarget(address indexed target, bool allowed);
-    event SetGovernanceTimelock(address indexed target, bytes4 indexed selector, uint256 newDuration);
+    event SetTimelock(address indexed target, bytes4 indexed selector, uint256 newDuration);
     event SetGovernanceAbdicated(address indexed target, bytes4 indexed selector, bool newAbdicated);
 
     event SetPerformanceFee(uint256 newPerformanceFee);
@@ -82,6 +83,7 @@ library EventsLib {
     event IncreaseRelativeCap(bytes32 indexed id, bytes idData, uint256 newRelativeCap);
     event SetMaxRate(uint256 newMaxRate);
     event SetForceDeallocatePenalty(address indexed strategy, uint256 forceDeallocatePenalty);
+    event SyncReportedNAV(address indexed priceManager, uint256 previousTotalAssets, uint256 newTotalAssets);
 
     // StrategyManager-related events
     event SetStrategyManager(address indexed newStrategyManager);

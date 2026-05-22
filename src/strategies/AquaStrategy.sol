@@ -4,17 +4,9 @@ pragma solidity ^0.8.24;
 
 import {IERC20} from "../interfaces/IERC20.sol";
 import {IStrategy} from "../interfaces/IStrategy.sol";
+import {IAaveV2, IAaveV2AToken} from "./interfaces/IAaveV2.sol";
 import {ErrorsLib} from "../libraries/ErrorsLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
-
-interface IAaveV2LendingPool {
-    function deposit(address asset, uint256 amount, address onBehalfOf, uint16 referralCode) external;
-    function withdraw(address asset, uint256 amount, address to) external returns (uint256);
-}
-
-interface IAaveV2AToken {
-    function balanceOf(address account) external view returns (uint256);
-}
 
 contract AquaStrategy is IStrategy {
     address public immutable vault;
@@ -46,7 +38,7 @@ contract AquaStrategy is IStrategy {
         onlyVault
         returns (bytes32[] memory ids, int256 change)
     {
-        if (assets > 0) IAaveV2LendingPool(lendingPool).deposit(asset, assets, address(this), 0);
+        if (assets > 0) IAaveV2(lendingPool).deposit(asset, assets, address(this), 0);
 
         ids = new bytes32[](1);
         ids[0] = keccak256(abi.encode(address(this), aToken));
@@ -59,7 +51,7 @@ contract AquaStrategy is IStrategy {
         returns (bytes32[] memory ids, int256 change)
     {
         if (assets > 0) {
-            uint256 withdrawn = IAaveV2LendingPool(lendingPool).withdraw(asset, assets, address(this));
+            uint256 withdrawn = IAaveV2(lendingPool).withdraw(asset, assets, address(this));
             require(withdrawn == assets, ErrorsLib.InsufficientLiquidity());
         }
 

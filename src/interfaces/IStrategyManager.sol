@@ -13,13 +13,6 @@ interface IStrategyManager {
         uint8 kind; // 0 = onchain, 1 = offchain reported, custom values are allowed.
     }
 
-    struct RebalanceAction {
-        address strategy;
-        bytes data;
-        uint256 assets;
-        bool isAllocate;
-    }
-
     function vault() external view returns (address);
     function asset() external view returns (address);
 
@@ -38,10 +31,9 @@ interface IStrategyManager {
     function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external;
     function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external;
 
-    function afterAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps) external;
-    function afterDeallocate(address strategy, bytes32[] memory ids, int256 change) external;
-
-    function rebalance(RebalanceAction[] calldata actions) external;
+    /// @notice Vault-only cap accounting hooks invoked after each allocate/deallocate.
+    function onAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps) external;
+    function onDeallocate(address strategy, bytes32[] memory ids, int256 change) external;
 
     function strategiesLength() external view returns (uint256);
     function strategies(uint256 index) external view returns (address);

@@ -2,11 +2,11 @@
 // Copyright (c) 2026 Ontorium
 pragma solidity ^0.8.28;
 
-import {IGovernanceTimelock} from "./interfaces/IGovernanceTimelock.sol";
+import {ITimelock} from "./interfaces/ITimelock.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
 
-contract GovernanceTimelock is IGovernanceTimelock {
+contract Timelock is ITimelock {
     address public owner;
     address public curator;
 
@@ -70,7 +70,7 @@ contract GovernanceTimelock is IGovernanceTimelock {
     function setTimelock(address target, bytes4 selector, uint256 newDuration) external onlyOwner {
         require(isTarget[target], ErrorsLib.InvalidTarget());
         timelock[target][selector] = newDuration;
-        emit EventsLib.SetGovernanceTimelock(target, selector, newDuration);
+        emit EventsLib.SetTimelock(target, selector, newDuration);
     }
 
     function setAbdicated(address target, bytes4 selector, bool newAbdicated) external onlyOwner {

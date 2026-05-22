@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ontorium
 pragma solidity ^0.8.28;
 
-interface IGovernanceTimelock {
+interface ITimelock {
     function owner() external view returns (address);
     function curator() external view returns (address);
     function isSentinel(address account) external view returns (bool);

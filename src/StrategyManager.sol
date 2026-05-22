@@ -6,25 +6,15 @@
 pragma solidity ^0.8.24;
 
 import {Caps} from "./interfaces/IVault.sol";
-import {IGovernanceTimelock} from "./interfaces/IGovernanceTimelock.sol";
+import {ITimelock} from "./interfaces/ITimelock.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {IStrategyRegistry} from "./interfaces/IStrategyRegistry.sol";
-
+import {IVault} from "./interfaces/IVault.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
 import "./libraries/ConstantsLib.sol";
 import {MathLib} from "./libraries/MathLib.sol";
-
-interface IVaultRolesLike {
-    function owner() external view returns (address);
-    function isAllocator(address account) external view returns (bool);
-}
-
-interface IVaultAllocationLike {
-    function allocate(address strategy, bytes memory data, uint256 assets) external;
-    function deallocate(address strategy, bytes memory data, uint256 assets) external;
-}
 
 /// @notice Holds strategy configuration, caps, allocation accounting, and optional rebalance execution.
 /// @dev This contract never holds vault assets. The Vault keeps custody and performs all token transfers.
@@ -43,28 +33,27 @@ contract StrategyManager is IStrategyManager {
     mapping(address strategy => uint256 indexPlusOne) internal _strategyIndexPlusOne;
     mapping(address strategy => StrategyConfig) public strategyConfig;
 
-    mapping(address strategy => uint256) public strategyAllocation;
     mapping(address strategy => uint256) public forceDeallocatePenalty;
 
     mapping(bytes32 id => Caps) internal caps;
 
     modifier onlyGovernance() {
-        require(msg.sender == IVaultRolesLike(vault).owner(), ErrorsLib.Unauthorized());
+        require(msg.sender == IVault(vault).owner(), ErrorsLib.Unauthorized());
         _;
     }
 
     modifier onlyGovernanceOrRiskAdmin() {
-        address governance = IVaultRolesLike(vault).owner();
+        address governance = IVault(vault).owner();
         require(
-            msg.sender == governance || msg.sender == IGovernanceTimelock(governance).curator()
-                || IGovernanceTimelock(governance).isSentinel(msg.sender),
+            msg.sender == governance || msg.sender == ITimelock(governance).curator()
+                || ITimelock(governance).isSentinel(msg.sender),
             ErrorsLib.Unauthorized()
         );
         _;
     }
 
-    modifier onlyAllocator() {
-        require(IVaultRolesLike(vault).isAllocator(msg.sender), ErrorsLib.Unauthorized());
+    modifier onlyVault() {
+        require(msg.sender == vault, ErrorsLib.Unauthorized());
         _;
     }
 
@@ -102,6 +91,11 @@ contract StrategyManager is IStrategyManager {
 
     function allocation(bytes32 id) external view returns (uint256) {
         return caps[id].allocation;
+    }
+
+    function strategyAllocation(address strategy) public view returns (uint256) {
+        if (!isStrategy(strategy)) return 0;
+        return IStrategy(strategy).totalAssets();
     }
 
     function setStrategyRegistry(address newStrategyRegistry) external onlyGovernance {
@@ -143,7 +137,7 @@ contract StrategyManager is IStrategyManager {
     function removeStrategy(address strategy) external onlyGovernance {
         uint256 indexPlusOne = _strategyIndexPlusOne[strategy];
         require(indexPlusOne != 0, ErrorsLib.NotStrategy());
-        require(strategyAllocation[strategy] == 0, ErrorsLib.ZeroAllocation());
+        require(strategyAllocation(strategy) == 0, ErrorsLib.ZeroAllocation());
         require(IStrategy(strategy).realAssets() == 0, ErrorsLib.ZeroAllocation());
 
         uint256 index = indexPlusOne - 1;
@@ -232,14 +226,15 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.SetForceDeallocatePenalty(strategy, newForceDeallocatePenalty);
     }
 
-    function afterAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps)
+    /// @notice Vault-only cap accounting hook called after Vault.allocate runs IStrategy.allocate.
+    /// @dev Vault holds the assets and orchestrates the strategy call; SM only validates/updates accounting.
+    function onAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps)
         external
+        onlyVault
     {
-        require(msg.sender == vault, ErrorsLib.Unauthorized());
         StrategyConfig memory config = strategyConfig[strategy];
         require(config.exists && config.active, ErrorsLib.NotStrategy());
 
-        _applyStrategyAllocationChange(strategy, change);
         _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
 
         for (uint256 i; i < ids.length; ++i) {
@@ -254,14 +249,13 @@ contract StrategyManager is IStrategyManager {
             );
         }
 
-        emit EventsLib.AfterAllocate(strategy, ids, change, strategyAllocation[strategy]);
+        emit EventsLib.AfterAllocate(strategy, ids, change, strategyAllocation(strategy));
     }
 
-    function afterDeallocate(address strategy, bytes32[] memory ids, int256 change) external {
-        require(msg.sender == vault, ErrorsLib.Unauthorized());
+    /// @notice Vault-only cap accounting hook called after Vault.deallocate runs IStrategy.deallocate.
+    /// @dev Intentionally does not check `active`: paused strategies must still allow withdrawals.
+    function onDeallocate(address strategy, bytes32[] memory ids, int256 change) external onlyVault {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
-
-        _applyStrategyAllocationChange(strategy, change);
 
         for (uint256 i; i < ids.length; ++i) {
             Caps storage _caps = caps[ids[i]];
@@ -269,20 +263,7 @@ contract StrategyManager is IStrategyManager {
             _caps.allocation = (int256(_caps.allocation) + change).toUint256();
         }
 
-        emit EventsLib.AfterDeallocate(strategy, ids, change, strategyAllocation[strategy]);
-    }
-
-    function rebalance(RebalanceAction[] calldata actions) external onlyAllocator {
-        // The StrategyManager must be whitelisted as allocator in the Vault for these calls to succeed.
-        for (uint256 i; i < actions.length; ++i) {
-            if (actions[i].isAllocate) {
-                IVaultAllocationLike(vault).allocate(actions[i].strategy, actions[i].data, actions[i].assets);
-            } else {
-                IVaultAllocationLike(vault).deallocate(actions[i].strategy, actions[i].data, actions[i].assets);
-            }
-        }
-
-        emit EventsLib.Rebalance(msg.sender, actions.length);
+        emit EventsLib.AfterDeallocate(strategy, ids, change, strategyAllocation(strategy));
     }
 
     function totalStrategyAssets() external view returns (uint256 totalAssets) {
@@ -300,14 +281,9 @@ contract StrategyManager is IStrategyManager {
         }
     }
 
-    function _applyStrategyAllocationChange(address strategy, int256 change) internal {
-        if (change == 0) return;
-
-        strategyAllocation[strategy] = (int256(strategyAllocation[strategy]) + change).toUint256();
-    }
-
     function _enforceStrategyCap(address strategy, uint256 capBps, uint256 totalAssetsForCaps) internal view {
-        require(capBps > 0, ErrorsLib.ZeroAbsoluteCap());
-        require(strategyAllocation[strategy] <= totalAssetsForCaps.mulDivDown(capBps, BPS), ErrorsLib.RelativeCapExceeded());
+        if (capBps == 0) return;
+        require(strategyAllocation(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS), ErrorsLib.RelativeCapExceeded());
     }
+
 }

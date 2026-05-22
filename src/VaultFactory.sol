@@ -5,7 +5,7 @@
 // Modified by Ontorium in 2026.
 pragma solidity ^0.8.28;
 
-import {GovernanceTimelock} from "./GovernanceTimelock.sol";
+import {Timelock} from "./Timelock.sol";
 import {Vault} from "./Vault.sol";
 import {StrategyManager} from "./StrategyManager.sol";
 import {IVaultFactory} from "./interfaces/IVaultFactory.sol";
@@ -16,13 +16,13 @@ contract VaultFactory is IVaultFactory {
     mapping(address vault => address strategyManager) public strategyManagerOf;
     mapping(address vault => address governance) public governanceOf;
 
-    /// @dev Atomically deploys a GovernanceTimelock, Vault and dedicated StrategyManager and links them.
+    /// @dev Atomically deploys a Timelock, Vault and dedicated StrategyManager and links them.
     /// @dev The factory temporarily owns both governance and vault so it can complete first-time wiring.
     function createVault(address owner, address asset, bytes32 salt)
         external
         returns (address newVault, address newStrategyManager, address newGovernance)
     {
-        GovernanceTimelock g = new GovernanceTimelock(address(this), owner);
+        Timelock g = new Timelock(address(this), owner);
         newGovernance = address(g);
 
         Vault v = new Vault{salt: salt}(address(this), asset);

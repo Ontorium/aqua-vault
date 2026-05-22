@@ -6,11 +6,10 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IGovernanceTimelock} from "./interfaces/IGovernanceTimelock.sol";
 import {IVault, WithdrawalRequest} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
-
+import {ITimelock} from "./interfaces/ITimelock.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
 import "./libraries/ConstantsLib.sol"; 
@@ -37,6 +36,7 @@ contract Vault is IVault {
     address public receiveAssetsGate;
     address public sendAssetsGate;
     address public strategyManager;
+    address public priceManager;
     mapping(address account => bool) public isAllocator;
 
     /* TOKEN STORAGE */
@@ -184,6 +184,14 @@ contract Vault is IVault {
         emit EventsLib.SetStrategyManager(newStrategyManager);
     }
 
+    function setPriceManager(address newPriceManager) external {
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
+        require(newPriceManager != address(0), ErrorsLib.ZeroAddress());
+        require(newPriceManager.code.length != 0, ErrorsLib.NoCode());
+        priceManager = newPriceManager;
+        emit EventsLib.SetPriceManager(newPriceManager);
+    }
+
     function setPerformanceFee(uint256 newPerformanceFee) external {
         require(msg.sender == owner, ErrorsLib.Unauthorized());
         require(newPerformanceFee <= MAX_PERFORMANCE_FEE, ErrorsLib.FeeTooHigh());
@@ -237,41 +245,37 @@ contract Vault is IVault {
 
     function allocateInternal(address strategy, bytes memory data, uint256 assets) internal {
         require(strategyManager != address(0), ErrorsLib.ZeroAddress());
-        // @dev Allocate requires the strategy to be active. A curator can pause a risky strategy via
-        // setStrategyActive(false) to immediately block new inflows without removing it from the registry.
-        require(IStrategyManager(strategyManager).isStrategyActive(strategy), ErrorsLib.NotStrategy());
 
         accrueInterest();
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).allocate(data, assets, msg.sig, msg.sender);
 
-        IStrategyManager(strategyManager).afterAllocate(strategy, ids, change, firstTotalAssets);
+        IStrategyManager(strategyManager).onAllocate(strategy, ids, change, firstTotalAssets);
 
         emit EventsLib.Allocate(msg.sender, strategy, assets, ids, change);
     }
 
     function deallocate(address strategy, bytes memory data, uint256 assets) external {
-        require(isAllocator[msg.sender] || _isGovernanceSentinel(msg.sender), ErrorsLib.Unauthorized());
+        require(
+            isAllocator[msg.sender] || ITimelock(owner).isSentinel(msg.sender), ErrorsLib.Unauthorized()
+        );
         deallocateInternal(strategy, data, assets);
     }
 
     function deallocateInternal(address strategy, bytes memory data, uint256 assets)
         internal
-        returns (bytes32[] memory)
+        returns (bytes32[] memory ids)
     {
         require(strategyManager != address(0), ErrorsLib.ZeroAddress());
-        // @dev Deallocate intentionally only checks isStrategy (not active). Once a strategy is paused via
-        // setStrategyActive(false), funds must still be recoverable; otherwise pausing would trap liquidity.
-        require(IStrategyManager(strategyManager).isStrategy(strategy), ErrorsLib.NotStrategy());
 
-        (bytes32[] memory ids, int256 change) = IStrategy(strategy).deallocate(data, assets, msg.sig, msg.sender);
+        int256 change;
+        (ids, change) = IStrategy(strategy).deallocate(data, assets, msg.sig, msg.sender);
 
-        IStrategyManager(strategyManager).afterDeallocate(strategy, ids, change);
+        IStrategyManager(strategyManager).onDeallocate(strategy, ids, change);
 
         SafeERC20Lib.safeTransferFrom(asset, strategy, address(this), assets);
         emit EventsLib.Deallocate(msg.sender, strategy, assets, ids, change);
-        return ids;
     }
 
     function setMaxRate(uint256 newMaxRate) external {
@@ -289,6 +293,27 @@ contract Vault is IVault {
 
     function accrueInterest() public {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
+    }
+
+    /// @dev PriceManager-only NAV sync path that bypasses maxRate and immediately reflects reported offchain NAV.
+    function syncReportedNAV() external {
+        require(msg.sender == priceManager, ErrorsLib.Unauthorized());
+
+        uint256 newTotalAssets = _realAssets();
+        uint256 previousTotalAssets = _totalAssets;
+        (uint256 performanceFeeShares, uint256 managementFeeShares) =
+            _previewFeeShares(previousTotalAssets, newTotalAssets, block.timestamp - lastUpdate);
+
+        _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
+        emit EventsLib.SyncReportedNAV(msg.sender, previousTotalAssets, newTotalAssets);
+    }
+
+    function _applyAccruedTotalAssets(
+        uint256 newTotalAssets,
+        uint256 performanceFeeShares,
+        uint256 managementFeeShares
+    ) internal {
         emit EventsLib.AccrueInterest(_totalAssets, newTotalAssets, performanceFeeShares, managementFeeShares);
         _totalAssets = newTotalAssets.toUint128();
         if (firstTotalAssets == 0) firstTotalAssets = newTotalAssets;
@@ -306,30 +331,38 @@ contract Vault is IVault {
     function accrueInterestView() public view returns (uint256, uint256, uint256) {
         if (firstTotalAssets != 0) return (_totalAssets, 0, 0);
         uint256 elapsed = block.timestamp - lastUpdate;
-        uint256 realAssets = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
-        if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
+        uint256 realAssets = _realAssets();
         uint256 maxTotalAssets = _totalAssets + (_totalAssets * elapsed).mulDivDown(maxRate, WAD);
         uint256 newTotalAssets = MathLib.min(realAssets, maxTotalAssets);
-        uint256 interest = newTotalAssets.zeroFloorSub(_totalAssets);
+        (uint256 performanceFeeShares, uint256 managementFeeShares) =
+            _previewFeeShares(_totalAssets, newTotalAssets, elapsed);
+        return (newTotalAssets, performanceFeeShares, managementFeeShares);
+    }
 
-        // The performance fee assets may be rounded down to 0 if interest * fee < WAD.
+    function _previewFeeShares(uint256 previousTotalAssets, uint256 newTotalAssets, uint256 elapsed)
+        internal
+        view
+        returns (uint256 performanceFeeShares, uint256 managementFeeShares)
+    {
+        uint256 interest = newTotalAssets.zeroFloorSub(previousTotalAssets);
+
         uint256 performanceFeeAssets = interest > 0 && performanceFee > 0 && canReceiveShares(performanceFeeRecipient)
             ? interest.mulDivDown(performanceFee, WAD)
             : 0;
-        // The management fee is taken on newTotalAssets to make all approximations consistent (interacting less
-        // increases fees).
         uint256 managementFeeAssets = elapsed > 0 && managementFee > 0 && canReceiveShares(managementFeeRecipient)
             ? (newTotalAssets * elapsed).mulDivDown(managementFee, WAD)
             : 0;
 
-        // Interest should be accrued at least every 10 years to avoid fees exceeding total assets.
         uint256 newTotalAssetsWithoutFees = newTotalAssets - performanceFeeAssets - managementFeeAssets;
-        uint256 performanceFeeShares =
+        performanceFeeShares =
             performanceFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
-        uint256 managementFeeShares =
+        managementFeeShares =
             managementFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
+    }
 
-        return (newTotalAssets, performanceFeeShares, managementFeeShares);
+    function _realAssets() internal view returns (uint256 realAssets) {
+        realAssets = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
+        if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
     }
 
     /// @dev Returns previewed minted shares.
@@ -508,11 +541,6 @@ contract Vault is IVault {
         uint256 penaltyShares = withdraw(penaltyAssets, address(this), onBehalf);
         emit EventsLib.ForceDeallocate(msg.sender, strategy, assets, onBehalf, ids, penaltyAssets);
         return penaltyShares;
-    }
-
-    function _isGovernanceSentinel(address account) internal view returns (bool) {
-        if (owner.code.length == 0) return false;
-        return IGovernanceTimelock(owner).isSentinel(account);
     }
 
     /* ERC20 FUNCTIONS */

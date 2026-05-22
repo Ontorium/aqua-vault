@@ -3,13 +3,13 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "../interfaces/IERC20.sol";
-import {IStrategy} from "../interfaces/IStrategy.sol";
+import {IOffchainNAVStrategy} from "../interfaces/IOffchainNAVStrategy.sol";
 import {ErrorsLib} from "../libraries/ErrorsLib.sol";
 
 /// @notice Minimal offchain/RWA strategy reporter.
 /// @dev This contract does not move assets to offchain by itself. It only reports NAV and immediately available cash.
 ///      The actual offchain custody process should be controlled by multisig/legal/custodian procedures.
-contract OffchainNAVStrategy is IStrategy {
+contract OffchainNAVStrategy is IOffchainNAVStrategy {
     address public immutable vault;
     address public immutable asset;
 
