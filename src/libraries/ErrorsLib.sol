@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Morpho Association
+// Copyright (c) 2026 Ontorium
+//
+// Modified by Ontorium in 2026.
 pragma solidity ^0.8.28;
 
 library ErrorsLib {
@@ -21,6 +24,8 @@ library ErrorsLib {
     error FeeInvariantBroken();
     error FeeTooHigh();
     error InsufficientLiquidity();
+    error InvalidStrategyManager();
+    error InvalidTarget();
     error InvalidRequest();
     error InvalidSigner();
     error MaxRateTooHigh();

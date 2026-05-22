@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Morpho Association
+// Copyright (c) 2026 Ontorium
+//
+// Modified by Ontorium in 2026.
 pragma solidity ^0.8.28;
 
 library EventsLib {
@@ -46,10 +49,10 @@ library EventsLib {
         uint256 previousTotalAssets, uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares
     );
 
-    // Timelock events
-    event Revoke(address indexed sender, bytes4 indexed selector, bytes data);
-    event Submit(bytes4 indexed selector, bytes data, uint256 executableAt);
-    event Accept(bytes4 indexed selector, bytes data);
+    // Governance timelock events
+    event GovernanceRevoke(address indexed sender, address indexed target, bytes4 indexed selector, bytes data);
+    event GovernanceSubmit(address indexed target, bytes4 indexed selector, bytes data, uint256 executableAt);
+    event GovernanceAccept(address indexed target, bytes4 indexed selector, bytes data);
 
     // Configuration events
     event SetOwner(address indexed newOwner);
@@ -65,9 +68,9 @@ library EventsLib {
     event SetStrategyRegistry(address indexed newStrategyRegistry);
     event AddStrategy(address indexed account);
     event RemoveStrategy(address indexed account);
-    event DecreaseTimelock(bytes4 indexed selector, uint256 newDuration);
-    event IncreaseTimelock(bytes4 indexed selector, uint256 newDuration);
-    event Abdicate(bytes4 indexed selector);
+    event SetGovernanceTarget(address indexed target, bool allowed);
+    event SetGovernanceTimelock(address indexed target, bytes4 indexed selector, uint256 newDuration);
+    event SetGovernanceAbdicated(address indexed target, bytes4 indexed selector, bool newAbdicated);
 
     event SetPerformanceFee(uint256 newPerformanceFee);
     event SetPerformanceFeeRecipient(address indexed newPerformanceFeeRecipient);
@@ -79,4 +82,14 @@ library EventsLib {
     event IncreaseRelativeCap(bytes32 indexed id, bytes idData, uint256 newRelativeCap);
     event SetMaxRate(uint256 newMaxRate);
     event SetForceDeallocatePenalty(address indexed strategy, uint256 forceDeallocatePenalty);
+
+    // StrategyManager-related events
+    event SetStrategyManager(address indexed newStrategyManager);
+    event SetStrategyActive(address indexed strategy, bool active);
+    event SetStrategyCapBps(address indexed strategy, uint256 capBps);
+    event SetStrategyTargetBps(address indexed strategy, uint256 targetBps);
+    event SetStrategyKind(address indexed strategy, uint8 kind);
+    event AfterAllocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);
+    event AfterDeallocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);
+    event Rebalance(address indexed caller, uint256 actionsLength);
 }

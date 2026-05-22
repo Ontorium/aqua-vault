@@ -6,13 +6,14 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IVault, Caps, WithdrawalRequest} from "./interfaces/IVault.sol";
+import {IGovernanceTimelock} from "./interfaces/IGovernanceTimelock.sol";
+import {IVault, WithdrawalRequest} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
-import {IStrategyRegistry} from "./interfaces/IStrategyRegistry.sol";
+import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
-import "./libraries/ConstantsLib.sol"; // forge-lint: disable-line(unaliased-plain-import)
+import "./libraries/ConstantsLib.sol"; 
 import {MathLib} from "./libraries/MathLib.sol";
 import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
 import {IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGate, ISendAssetsGate} from "./interfaces/IGate.sol";
@@ -31,13 +32,11 @@ contract Vault is IVault {
     /* ROLES STORAGE */
 
     address public owner;
-    address public curator;
     address public receiveSharesGate;
     address public sendSharesGate;
     address public receiveAssetsGate;
     address public sendAssetsGate;
-    address public strategyRegistry;
-    mapping(address account => bool) public isSentinel;
+    address public strategyManager;
     mapping(address account => bool) public isAllocator;
 
     /* TOKEN STORAGE */
@@ -56,18 +55,10 @@ contract Vault is IVault {
     uint64 public lastUpdate;
     uint64 public maxRate;
 
-    /* CURATION STORAGE */
+    /* STRATEGY STORAGE */
 
-    mapping(address account => bool) public isStrategy;
-    address[] public strategys;
-    mapping(bytes32 id => Caps) internal caps;
-    mapping(address strategy => uint256) public forceDeallocatePenalty;
-
-    /* TIMELOCKS STORAGE */
-
-    mapping(bytes4 selector => uint256) public timelock;
-    mapping(bytes4 selector => bool) public abdicated;
-    mapping(bytes data => uint256) public executableAt;
+    /// @dev Strategy registry/caps/allocation live in StrategyManager.
+    /// @dev Vault keeps custody of assets and only asks StrategyManager to validate/update accounting.
 
     /* FEES STORAGE */
 
@@ -86,9 +77,8 @@ contract Vault is IVault {
 
     /* GETTERS */
 
-    function strategysLength() external view returns (uint256) {
-        return strategys.length;
-    }
+    /// @dev Strategy registry, caps, allocation, per-strategy/per-id queries and aggregate liquidity views
+    /// are intentionally NOT mirrored here — query StrategyManager (via strategyManager()) directly.
 
     function totalAssets() external view returns (uint256) {
         (uint256 newTotalAssets,,) = accrueInterestView();
@@ -98,18 +88,6 @@ contract Vault is IVault {
     /// forge-lint: disable-next-item(mixed-case-function)
     function DOMAIN_SEPARATOR() public view returns (bytes32) {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, block.chainid, address(this)));
-    }
-
-    function absoluteCap(bytes32 id) external view returns (uint256) {
-        return caps[id].absoluteCap;
-    }
-
-    function relativeCap(bytes32 id) external view returns (uint256) {
-        return caps[id].relativeCap;
-    }
-
-    function allocation(bytes32 id) external view returns (uint256) {
-        return caps[id].allocation;
     }
 
     /* MULTICALL */
@@ -150,18 +128,6 @@ contract Vault is IVault {
         emit EventsLib.SetOwner(newOwner);
     }
 
-    function setCurator(address newCurator) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        curator = newCurator;
-        emit EventsLib.SetCurator(newCurator);
-    }
-
-    function setIsSentinel(address account, bool newIsSentinel) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        isSentinel[account] = newIsSentinel;
-        emit EventsLib.SetIsSentinel(account, newIsSentinel);
-    }
-
     function setName(string memory newName) external {
         require(msg.sender == owner, ErrorsLib.Unauthorized());
         name = newName;
@@ -174,146 +140,52 @@ contract Vault is IVault {
         emit EventsLib.SetSymbol(newSymbol);
     }
 
-    /* TIMELOCKS FOR CURATOR FUNCTIONS */
-
-    /// @dev Will revert if the timelock value is type(uint256).max or any value that overflows when added to the block
-    /// timestamp.
-    function submit(bytes calldata data) external {
-        require(msg.sender == curator, ErrorsLib.Unauthorized());
-        require(executableAt[data] == 0, ErrorsLib.DataAlreadyPending());
-
-        // forge-lint: disable-next-item(unsafe-typecast) we explicitly want only the first bytes4.
-        bytes4 selector = bytes4(data);
-        // forge-lint: disable-next-item(unsafe-typecast) we explicitly want only the second bytes4.
-        uint256 _timelock =
-            selector == IVault.decreaseTimelock.selector ? timelock[bytes4(data[4:8])] : timelock[selector];
-        executableAt[data] = block.timestamp + _timelock;
-        emit EventsLib.Submit(selector, data, executableAt[data]);
-    }
-
-    function timelocked() internal {
-        bytes4 selector = bytes4(msg.data);
-        require(executableAt[msg.data] != 0, ErrorsLib.DataNotTimelocked());
-        require(block.timestamp >= executableAt[msg.data], ErrorsLib.TimelockNotExpired());
-        require(!abdicated[selector], ErrorsLib.Abdicated());
-        executableAt[msg.data] = 0;
-        emit EventsLib.Accept(selector, msg.data);
-    }
-
-    function revoke(bytes calldata data) external {
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        require(executableAt[data] != 0, ErrorsLib.DataNotTimelocked());
-        executableAt[data] = 0;
-        // forge-lint: disable-next-item(unsafe-typecast) we explicitly want only the first bytes4.
-        bytes4 selector = bytes4(data);
-        emit EventsLib.Revoke(msg.sender, selector, data);
-    }
-
-    /* CURATOR FUNCTIONS */
-
     function setIsAllocator(address account, bool newIsAllocator) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         isAllocator[account] = newIsAllocator;
         emit EventsLib.SetIsAllocator(account, newIsAllocator);
     }
 
     function setReceiveSharesGate(address newReceiveSharesGate) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         receiveSharesGate = newReceiveSharesGate;
         emit EventsLib.SetReceiveSharesGate(newReceiveSharesGate);
     }
 
     function setSendSharesGate(address newSendSharesGate) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         sendSharesGate = newSendSharesGate;
         emit EventsLib.SetSendSharesGate(newSendSharesGate);
     }
 
     function setReceiveAssetsGate(address newReceiveAssetsGate) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         receiveAssetsGate = newReceiveAssetsGate;
         emit EventsLib.SetReceiveAssetsGate(newReceiveAssetsGate);
     }
 
     function setSendAssetsGate(address newSendAssetsGate) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         sendAssetsGate = newSendAssetsGate;
         emit EventsLib.SetSendAssetsGate(newSendAssetsGate);
     }
 
-    /// @dev The no-op will revert if the registry now returns false for an already added strategy.
-    function setStrategyRegistry(address newStrategyRegistry) external {
-        timelocked();
+    /// @dev One-time setup so the factory can atomically deploy and link a dedicated StrategyManager.
+    /// @dev The manager must explicitly point back to this Vault and use the same asset.
+    function setStrategyManager(address newStrategyManager) external {
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
+        require(strategyManager == address(0), ErrorsLib.InvalidStrategyManager());
+        require(newStrategyManager != address(0), ErrorsLib.ZeroAddress());
+        require(newStrategyManager.code.length != 0, ErrorsLib.NoCode());
+        require(IStrategyManager(newStrategyManager).vault() == address(this), ErrorsLib.InvalidStrategyManager());
+        require(IStrategyManager(newStrategyManager).asset() == asset, ErrorsLib.InvalidStrategyManager());
 
-        if (newStrategyRegistry != address(0)) {
-            for (uint256 i = 0; i < strategys.length; i++) {
-                require(
-                    IStrategyRegistry(newStrategyRegistry).isInRegistry(strategys[i]), ErrorsLib.NotInStrategyRegistry()
-                );
-            }
-        }
-
-        strategyRegistry = newStrategyRegistry;
-        emit EventsLib.SetStrategyRegistry(newStrategyRegistry);
-    }
-
-    function addStrategy(address account) external {
-        timelocked();
-        require(
-            strategyRegistry == address(0) || IStrategyRegistry(strategyRegistry).isInRegistry(account),
-            ErrorsLib.NotInStrategyRegistry()
-        );
-        if (!isStrategy[account]) {
-            strategys.push(account);
-            isStrategy[account] = true;
-        }
-        emit EventsLib.AddStrategy(account);
-    }
-
-    function removeStrategy(address account) external {
-        timelocked();
-        if (isStrategy[account]) {
-            for (uint256 i = 0; i < strategys.length; i++) {
-                if (strategys[i] == account) {
-                    strategys[i] = strategys[strategys.length - 1];
-                    strategys.pop();
-                    break;
-                }
-            }
-            isStrategy[account] = false;
-        }
-        emit EventsLib.RemoveStrategy(account);
-    }
-
-    /// @dev This function requires great caution because it can irreversibly disable submit for a selector.
-    /// @dev Existing pending operations submitted before increasing a timelock can still be executed at the initial
-    /// executableAt.
-    function increaseTimelock(bytes4 selector, uint256 newDuration) external {
-        timelocked();
-        require(selector != IVault.decreaseTimelock.selector, ErrorsLib.AutomaticallyTimelocked());
-        require(newDuration >= timelock[selector], ErrorsLib.TimelockNotIncreasing());
-
-        timelock[selector] = newDuration;
-        emit EventsLib.IncreaseTimelock(selector, newDuration);
-    }
-
-    function decreaseTimelock(bytes4 selector, uint256 newDuration) external {
-        timelocked();
-        require(selector != IVault.decreaseTimelock.selector, ErrorsLib.AutomaticallyTimelocked());
-        require(newDuration <= timelock[selector], ErrorsLib.TimelockNotDecreasing());
-
-        timelock[selector] = newDuration;
-        emit EventsLib.DecreaseTimelock(selector, newDuration);
-    }
-
-    function abdicate(bytes4 selector) external {
-        timelocked();
-        abdicated[selector] = true;
-        emit EventsLib.Abdicate(selector);
+        strategyManager = newStrategyManager;
+        emit EventsLib.SetStrategyManager(newStrategyManager);
     }
 
     function setPerformanceFee(uint256 newPerformanceFee) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         require(newPerformanceFee <= MAX_PERFORMANCE_FEE, ErrorsLib.FeeTooHigh());
         require(performanceFeeRecipient != address(0) || newPerformanceFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -325,7 +197,7 @@ contract Vault is IVault {
     }
 
     function setManagementFee(uint256 newManagementFee) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         require(newManagementFee <= MAX_MANAGEMENT_FEE, ErrorsLib.FeeTooHigh());
         require(managementFeeRecipient != address(0) || newManagementFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -337,7 +209,7 @@ contract Vault is IVault {
     }
 
     function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         require(newPerformanceFeeRecipient != address(0) || performanceFee == 0, ErrorsLib.FeeInvariantBroken());
 
         accrueInterest();
@@ -347,60 +219,13 @@ contract Vault is IVault {
     }
 
     function setManagementFeeRecipient(address newManagementFeeRecipient) external {
-        timelocked();
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         require(newManagementFeeRecipient != address(0) || managementFee == 0, ErrorsLib.FeeInvariantBroken());
 
         accrueInterest();
 
         managementFeeRecipient = newManagementFeeRecipient;
         emit EventsLib.SetManagementFeeRecipient(newManagementFeeRecipient);
-    }
-
-    function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external {
-        timelocked();
-        bytes32 id = keccak256(idData);
-        require(newAbsoluteCap >= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotIncreasing());
-
-        caps[id].absoluteCap = newAbsoluteCap.toUint128();
-        emit EventsLib.IncreaseAbsoluteCap(id, idData, newAbsoluteCap);
-    }
-
-    function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external {
-        bytes32 id = keccak256(idData);
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        require(newAbsoluteCap <= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotDecreasing());
-
-        // forge-lint: disable-next-item(unsafe-typecast) safe because newAbsoluteCap <= absoluteCap < 2**128.
-        caps[id].absoluteCap = uint128(newAbsoluteCap);
-        emit EventsLib.DecreaseAbsoluteCap(msg.sender, id, idData, newAbsoluteCap);
-    }
-
-    function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external {
-        timelocked();
-        bytes32 id = keccak256(idData);
-        require(newRelativeCap <= WAD, ErrorsLib.RelativeCapAboveOne());
-        require(newRelativeCap >= caps[id].relativeCap, ErrorsLib.RelativeCapNotIncreasing());
-
-        // forge-lint: disable-next-item(unsafe-typecast) safe because WAD < 2**128.
-        caps[id].relativeCap = uint128(newRelativeCap);
-        emit EventsLib.IncreaseRelativeCap(id, idData, newRelativeCap);
-    }
-
-    function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external {
-        bytes32 id = keccak256(idData);
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        require(newRelativeCap <= caps[id].relativeCap, ErrorsLib.RelativeCapNotDecreasing());
-
-        // forge-lint: disable-next-item(unsafe-typecast) safe because WAD < 2**128.
-        caps[id].relativeCap = uint128(newRelativeCap);
-        emit EventsLib.DecreaseRelativeCap(msg.sender, id, idData, newRelativeCap);
-    }
-
-    function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external {
-        timelocked();
-        require(newForceDeallocatePenalty <= MAX_FORCE_DEALLOCATE_PENALTY, ErrorsLib.PenaltyTooHigh());
-        forceDeallocatePenalty[strategy] = newForceDeallocatePenalty;
-        emit EventsLib.SetForceDeallocatePenalty(strategy, newForceDeallocatePenalty);
     }
 
     /* ALLOCATOR FUNCTIONS */
@@ -411,29 +236,23 @@ contract Vault is IVault {
     }
 
     function allocateInternal(address strategy, bytes memory data, uint256 assets) internal {
-        require(isStrategy[strategy], ErrorsLib.NotStrategy());
+        require(strategyManager != address(0), ErrorsLib.ZeroAddress());
+        // @dev Allocate requires the strategy to be active. A curator can pause a risky strategy via
+        // setStrategyActive(false) to immediately block new inflows without removing it from the registry.
+        require(IStrategyManager(strategyManager).isStrategyActive(strategy), ErrorsLib.NotStrategy());
 
         accrueInterest();
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).allocate(data, assets, msg.sig, msg.sender);
 
-        for (uint256 i; i < ids.length; i++) {
-            Caps storage _caps = caps[ids[i]];
-            _caps.allocation = (int256(_caps.allocation) + change).toUint256();
+        IStrategyManager(strategyManager).afterAllocate(strategy, ids, change, firstTotalAssets);
 
-            require(_caps.absoluteCap > 0, ErrorsLib.ZeroAbsoluteCap());
-            require(_caps.allocation <= _caps.absoluteCap, ErrorsLib.AbsoluteCapExceeded());
-            require(
-                _caps.relativeCap == WAD || _caps.allocation <= firstTotalAssets.mulDivDown(_caps.relativeCap, WAD),
-                ErrorsLib.RelativeCapExceeded()
-            );
-        }
         emit EventsLib.Allocate(msg.sender, strategy, assets, ids, change);
     }
 
     function deallocate(address strategy, bytes memory data, uint256 assets) external {
-        require(isAllocator[msg.sender] || isSentinel[msg.sender], ErrorsLib.Unauthorized());
+        require(isAllocator[msg.sender] || _isGovernanceSentinel(msg.sender), ErrorsLib.Unauthorized());
         deallocateInternal(strategy, data, assets);
     }
 
@@ -441,15 +260,14 @@ contract Vault is IVault {
         internal
         returns (bytes32[] memory)
     {
-        require(isStrategy[strategy], ErrorsLib.NotStrategy());
+        require(strategyManager != address(0), ErrorsLib.ZeroAddress());
+        // @dev Deallocate intentionally only checks isStrategy (not active). Once a strategy is paused via
+        // setStrategyActive(false), funds must still be recoverable; otherwise pausing would trap liquidity.
+        require(IStrategyManager(strategyManager).isStrategy(strategy), ErrorsLib.NotStrategy());
 
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).deallocate(data, assets, msg.sig, msg.sender);
 
-        for (uint256 i; i < ids.length; i++) {
-            Caps storage _caps = caps[ids[i]];
-            require(_caps.allocation > 0, ErrorsLib.ZeroAllocation());
-            _caps.allocation = (int256(_caps.allocation) + change).toUint256();
-        }
+        IStrategyManager(strategyManager).afterDeallocate(strategy, ids, change);
 
         SafeERC20Lib.safeTransferFrom(asset, strategy, address(this), assets);
         emit EventsLib.Deallocate(msg.sender, strategy, assets, ids, change);
@@ -457,7 +275,7 @@ contract Vault is IVault {
     }
 
     function setMaxRate(uint256 newMaxRate) external {
-        require(isAllocator[msg.sender], ErrorsLib.Unauthorized());
+        require(msg.sender == owner, ErrorsLib.Unauthorized());
         require(newMaxRate <= MAX_MAX_RATE, ErrorsLib.MaxRateTooHigh());
 
         accrueInterest();
@@ -489,9 +307,7 @@ contract Vault is IVault {
         if (firstTotalAssets != 0) return (_totalAssets, 0, 0);
         uint256 elapsed = block.timestamp - lastUpdate;
         uint256 realAssets = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
-        for (uint256 i = 0; i < strategys.length; i++) {
-            realAssets += IStrategy(strategys[i]).realAssets();
-        }
+        if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
         uint256 maxTotalAssets = _totalAssets + (_totalAssets * elapsed).mulDivDown(maxRate, WAD);
         uint256 newTotalAssets = MathLib.min(realAssets, maxTotalAssets);
         uint256 interest = newTotalAssets.zeroFloorSub(_totalAssets);
@@ -687,10 +503,16 @@ contract Vault is IVault {
         returns (uint256)
     {
         bytes32[] memory ids = deallocateInternal(strategy, data, assets);
-        uint256 penaltyAssets = assets.mulDivUp(forceDeallocatePenalty[strategy], WAD);
+        uint256 penaltyAssets =
+            assets.mulDivUp(IStrategyManager(strategyManager).forceDeallocatePenalty(strategy), WAD);
         uint256 penaltyShares = withdraw(penaltyAssets, address(this), onBehalf);
         emit EventsLib.ForceDeallocate(msg.sender, strategy, assets, onBehalf, ids, penaltyAssets);
         return penaltyShares;
+    }
+
+    function _isGovernanceSentinel(address account) internal view returns (bool) {
+        if (owner.code.length == 0) return false;
+        return IGovernanceTimelock(owner).isSentinel(account);
     }
 
     /* ERC20 FUNCTIONS */

@@ -8,11 +8,22 @@ pragma solidity >=0.5.0;
 interface IVaultFactory {
     /* EVENTS */
 
-    event CreateVault(address indexed owner, address indexed asset, bytes32 salt, address indexed newVaultV2);
+    event CreateVault(
+        address indexed owner,
+        address indexed asset,
+        bytes32 salt,
+        address indexed newVault,
+        address newStrategyManager,
+        address newGovernance
+    );
 
     /* FUNCTIONS */
 
     function isVault(address account) external view returns (bool);
     function vault(address owner, address asset, bytes32 salt) external view returns (address);
-    function createVault(address owner, address asset, bytes32 salt) external returns (address newVaultV2);
+    function strategyManagerOf(address vault) external view returns (address);
+    function governanceOf(address vault) external view returns (address);
+    function createVault(address owner, address asset, bytes32 salt)
+        external
+        returns (address newVault, address newStrategyManager, address newGovernance);
 }
