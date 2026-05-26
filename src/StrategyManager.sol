@@ -313,6 +313,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                 IVault(vault).deallocate(actions[i].strategy, actions[i].data, actions[i].assets);
             }
         }
+
+        emit EventsLib.Rebalance(msg.sender, actions.length);
     }
 
     /* AGGREGATE VIEWS */
