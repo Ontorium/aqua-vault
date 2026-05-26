@@ -13,7 +13,6 @@ interface IPriceManager is INAVHook {
         uint256 pricePerShare;
     }
 
-    function navUpdater() external view returns (address);
     function vault() external view returns (address);
     function offchainStrategy() external view returns (address);
     function metrics() external view returns (uint128, uint128, uint128, uint64, uint256);

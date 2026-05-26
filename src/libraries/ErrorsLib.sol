@@ -13,6 +13,7 @@ library ErrorsLib {
     error ApproveReturnedFalse();
     error ApproveReverted();
     error AutomaticallyTimelocked();
+    error AvailableExceedsReportedAssets();
     error CannotReceiveShares();
     error CannotReceiveAssets();
     error CannotSendShares();
@@ -21,6 +22,7 @@ library ErrorsLib {
     error CastOverflow();
     error DataAlreadyPending();
     error DataNotTimelocked();
+    error DeallocationExceedsAllocation();
     error FeeInvariantBroken();
     error FeeTooHigh();
     error InsufficientLiquidity();
@@ -28,6 +30,7 @@ library ErrorsLib {
     error InvalidTarget();
     error InvalidRequest();
     error InvalidSigner();
+    error MaxChangeExceeded();
     error MaxRateTooHigh();
     error NoCode();
     error NotStrategy();
@@ -39,6 +42,9 @@ library ErrorsLib {
     error RelativeCapNotDecreasing();
     error RelativeCapNotIncreasing();
     error RequestAlreadyClaimed();
+    error RequestExceedsAvailableLiquidity();
+    error RequestExceedsReportedAssets();
+    error ReturnNotReceived();
     error TimelockNotDecreasing();
     error TimelockNotExpired();
     error TimelockNotIncreasing();

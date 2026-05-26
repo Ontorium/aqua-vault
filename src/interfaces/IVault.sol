@@ -23,15 +23,14 @@ struct WithdrawalRequest {
 interface IVault is IERC4626, IERC2612 {
     // State variables
     function virtualShares() external view returns (uint256);
-    // @dev owner() is expected to point at the governance contract that owns privileged Vault actions.
-    function owner() external view returns (address);
+    // @dev All role-based permissions live in the central RoleManager (queryable directly on Vault via
+    // `Vault(address).roleManager()` which returns the IRoleManager handle).
     function receiveSharesGate() external view returns (address);
     function sendSharesGate() external view returns (address);
     function receiveAssetsGate() external view returns (address);
     function sendAssetsGate() external view returns (address);
     function strategyManager() external view returns (address);
     function priceManager() external view returns (address);
-    function isAllocator(address account) external view returns (bool);
     function firstTotalAssets() external view returns (uint256);
     function _totalAssets() external view returns (uint128);
     function lastUpdate() external view returns (uint64);
@@ -59,11 +58,9 @@ interface IVault is IERC4626, IERC2612 {
     // Multicall
     function multicall(bytes[] memory data) external;
 
-    // Governance-owned Vault admin
-    function setOwner(address newOwner) external;
+    // Governance-owned Vault admin (all gated by RoleManager.GOVERNANCE_ROLE)
     function setName(string memory newName) external;
     function setSymbol(string memory newSymbol) external;
-    function setIsAllocator(address account, bool newIsAllocator) external;
     function setReceiveSharesGate(address newReceiveSharesGate) external;
     function setSendSharesGate(address newSendSharesGate) external;
     function setReceiveAssetsGate(address newReceiveAssetsGate) external;

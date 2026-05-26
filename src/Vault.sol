@@ -9,15 +9,16 @@ import {IERC20} from "./interfaces/IERC20.sol";
 import {IVault, WithdrawalRequest} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
-import {ITimelock} from "./interfaces/ITimelock.sol";
+import {AccessManaged} from "./AccessManaged.sol";
+import {RoleManager} from "./RoleManager.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
-import "./libraries/ConstantsLib.sol"; 
+import "./libraries/ConstantsLib.sol";
 import {MathLib} from "./libraries/MathLib.sol";
 import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
 import {IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGate, ISendAssetsGate} from "./interfaces/IGate.sol";
 
-contract Vault is IVault {
+contract Vault is IVault, AccessManaged {
     using MathLib for uint256;
     using MathLib for uint128;
     using MathLib for int256;
@@ -28,16 +29,14 @@ contract Vault is IVault {
     uint8 public immutable decimals;
     uint256 public immutable virtualShares;
 
-    /* ROLES STORAGE */
+    /* WIRING STORAGE */
 
-    address public owner;
     address public receiveSharesGate;
     address public sendSharesGate;
     address public receiveAssetsGate;
     address public sendAssetsGate;
     address public strategyManager;
     address public priceManager;
-    mapping(address account => bool) public isAllocator;
 
     /* TOKEN STORAGE */
 
@@ -108,72 +107,52 @@ contract Vault is IVault {
 
     /* CONSTRUCTOR */
 
-    constructor(address _owner, address _asset) {
+    constructor(address _roleManager, address _asset) AccessManaged(_roleManager) {
         asset = _asset;
-        owner = _owner;
         lastUpdate = uint64(block.timestamp);
         uint256 assetDecimals = IERC20(_asset).decimals();
         uint256 decimalOffset = uint256(18).zeroFloorSub(assetDecimals);
         // forge-lint: disable-next-item(unsafe-typecast) safe because assetDecimals + decimalOffset <= 18.
         decimals = uint8(assetDecimals + decimalOffset);
         virtualShares = 10 ** decimalOffset;
-        emit EventsLib.Constructor(_owner, _asset);
+        emit EventsLib.Constructor(_roleManager, _asset);
     }
 
-    /* OWNER FUNCTIONS */
+    /* GOVERNANCE FUNCTIONS (gated by RoleManager) */
 
-    function setOwner(address newOwner) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        owner = newOwner;
-        emit EventsLib.SetOwner(newOwner);
-    }
-
-    function setName(string memory newName) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setName(string memory newName) external onlyRole(GOVERNANCE_ROLE) {
         name = newName;
         emit EventsLib.SetName(newName);
     }
 
-    function setSymbol(string memory newSymbol) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setSymbol(string memory newSymbol) external onlyRole(GOVERNANCE_ROLE) {
         symbol = newSymbol;
         emit EventsLib.SetSymbol(newSymbol);
     }
 
-    function setIsAllocator(address account, bool newIsAllocator) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        isAllocator[account] = newIsAllocator;
-        emit EventsLib.SetIsAllocator(account, newIsAllocator);
-    }
-
-    function setReceiveSharesGate(address newReceiveSharesGate) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setReceiveSharesGate(address newReceiveSharesGate) external onlyRole(GOVERNANCE_ROLE) {
         receiveSharesGate = newReceiveSharesGate;
         emit EventsLib.SetReceiveSharesGate(newReceiveSharesGate);
     }
 
-    function setSendSharesGate(address newSendSharesGate) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setSendSharesGate(address newSendSharesGate) external onlyRole(GOVERNANCE_ROLE) {
         sendSharesGate = newSendSharesGate;
         emit EventsLib.SetSendSharesGate(newSendSharesGate);
     }
 
-    function setReceiveAssetsGate(address newReceiveAssetsGate) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setReceiveAssetsGate(address newReceiveAssetsGate) external onlyRole(GOVERNANCE_ROLE) {
         receiveAssetsGate = newReceiveAssetsGate;
         emit EventsLib.SetReceiveAssetsGate(newReceiveAssetsGate);
     }
 
-    function setSendAssetsGate(address newSendAssetsGate) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setSendAssetsGate(address newSendAssetsGate) external onlyRole(GOVERNANCE_ROLE) {
         sendAssetsGate = newSendAssetsGate;
         emit EventsLib.SetSendAssetsGate(newSendAssetsGate);
     }
 
     /// @dev One-time setup so the factory can atomically deploy and link a dedicated StrategyManager.
     /// @dev The manager must explicitly point back to this Vault and use the same asset.
-    function setStrategyManager(address newStrategyManager) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setStrategyManager(address newStrategyManager) external onlyRole(GOVERNANCE_ROLE) {
         require(strategyManager == address(0), ErrorsLib.InvalidStrategyManager());
         require(newStrategyManager != address(0), ErrorsLib.ZeroAddress());
         require(newStrategyManager.code.length != 0, ErrorsLib.NoCode());
@@ -184,16 +163,14 @@ contract Vault is IVault {
         emit EventsLib.SetStrategyManager(newStrategyManager);
     }
 
-    function setPriceManager(address newPriceManager) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setPriceManager(address newPriceManager) external onlyRole(GOVERNANCE_ROLE) {
         require(newPriceManager != address(0), ErrorsLib.ZeroAddress());
         require(newPriceManager.code.length != 0, ErrorsLib.NoCode());
         priceManager = newPriceManager;
         emit EventsLib.SetPriceManager(newPriceManager);
     }
 
-    function setPerformanceFee(uint256 newPerformanceFee) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setPerformanceFee(uint256 newPerformanceFee) external onlyRole(GOVERNANCE_ROLE) {
         require(newPerformanceFee <= MAX_PERFORMANCE_FEE, ErrorsLib.FeeTooHigh());
         require(performanceFeeRecipient != address(0) || newPerformanceFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -204,8 +181,7 @@ contract Vault is IVault {
         emit EventsLib.SetPerformanceFee(newPerformanceFee);
     }
 
-    function setManagementFee(uint256 newManagementFee) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setManagementFee(uint256 newManagementFee) external onlyRole(GOVERNANCE_ROLE) {
         require(newManagementFee <= MAX_MANAGEMENT_FEE, ErrorsLib.FeeTooHigh());
         require(managementFeeRecipient != address(0) || newManagementFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -216,8 +192,7 @@ contract Vault is IVault {
         emit EventsLib.SetManagementFee(newManagementFee);
     }
 
-    function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
         require(newPerformanceFeeRecipient != address(0) || performanceFee == 0, ErrorsLib.FeeInvariantBroken());
 
         accrueInterest();
@@ -226,8 +201,7 @@ contract Vault is IVault {
         emit EventsLib.SetPerformanceFeeRecipient(newPerformanceFeeRecipient);
     }
 
-    function setManagementFeeRecipient(address newManagementFeeRecipient) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setManagementFeeRecipient(address newManagementFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
         require(newManagementFeeRecipient != address(0) || managementFee == 0, ErrorsLib.FeeInvariantBroken());
 
         accrueInterest();
@@ -238,8 +212,7 @@ contract Vault is IVault {
 
     /* ALLOCATOR FUNCTIONS */
 
-    function allocate(address strategy, bytes memory data, uint256 assets) external {
-        require(isAllocator[msg.sender], ErrorsLib.Unauthorized());
+    function allocate(address strategy, bytes memory data, uint256 assets) external onlyRole(ALLOCATOR_ROLE) {
         allocateInternal(strategy, data, assets);
     }
 
@@ -257,9 +230,7 @@ contract Vault is IVault {
     }
 
     function deallocate(address strategy, bytes memory data, uint256 assets) external {
-        require(
-            isAllocator[msg.sender] || ITimelock(owner).isSentinel(msg.sender), ErrorsLib.Unauthorized()
-        );
+        _requireAnyRole(ALLOCATOR_ROLE, SENTINEL_ROLE);
         deallocateInternal(strategy, data, assets);
     }
 
@@ -278,8 +249,7 @@ contract Vault is IVault {
         emit EventsLib.Deallocate(msg.sender, strategy, assets, ids, change);
     }
 
-    function setMaxRate(uint256 newMaxRate) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setMaxRate(uint256 newMaxRate) external onlyRole(GOVERNANCE_ROLE) {
         require(newMaxRate <= MAX_MAX_RATE, ErrorsLib.MaxRateTooHigh());
 
         accrueInterest();

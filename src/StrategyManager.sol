@@ -6,11 +6,12 @@
 pragma solidity ^0.8.24;
 
 import {Caps} from "./interfaces/IVault.sol";
-import {ITimelock} from "./interfaces/ITimelock.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {IStrategyRegistry} from "./interfaces/IStrategyRegistry.sol";
 import {IVault} from "./interfaces/IVault.sol";
+import {AccessManaged} from "./AccessManaged.sol";
+
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
 import "./libraries/ConstantsLib.sol";
@@ -18,11 +19,15 @@ import {MathLib} from "./libraries/MathLib.sol";
 
 /// @notice Holds strategy configuration, caps, allocation accounting, and optional rebalance execution.
 /// @dev This contract never holds vault assets. The Vault keeps custody and performs all token transfers.
-contract StrategyManager is IStrategyManager {
+contract StrategyManager is IStrategyManager, AccessManaged {
     using MathLib for uint256;
     using MathLib for int256;
 
     uint256 internal constant BPS = 10_000;
+
+    uint8 public constant STRATEGY_KIND_NONE = 0;
+    uint8 public constant STRATEGY_KIND_ONCHAIN = 1;
+    uint8 public constant STRATEGY_KIND_OFFCHAIN_NAV = 2;
 
     address public immutable vault;
     address public immutable asset;
@@ -37,27 +42,12 @@ contract StrategyManager is IStrategyManager {
 
     mapping(bytes32 id => Caps) internal caps;
 
-    modifier onlyGovernance() {
-        require(msg.sender == IVault(vault).owner(), ErrorsLib.Unauthorized());
-        _;
-    }
-
-    modifier onlyGovernanceOrRiskAdmin() {
-        address governance = IVault(vault).owner();
-        require(
-            msg.sender == governance || msg.sender == ITimelock(governance).curator()
-                || ITimelock(governance).isSentinel(msg.sender),
-            ErrorsLib.Unauthorized()
-        );
-        _;
-    }
-
     modifier onlyVault() {
         require(msg.sender == vault, ErrorsLib.Unauthorized());
         _;
     }
 
-    constructor(address _vault, address _asset) {
+    constructor(address _vault, address _asset, address _roleManager) AccessManaged(_roleManager) {
         require(_vault != address(0), ErrorsLib.ZeroAddress());
         require(_asset != address(0), ErrorsLib.ZeroAddress());
 
@@ -65,12 +55,18 @@ contract StrategyManager is IStrategyManager {
         asset = _asset;
     }
 
+    /* GETTERS */
+
     function strategiesLength() external view returns (uint256) {
         return _strategies.length;
     }
 
     function strategies(uint256 index) external view returns (address) {
         return _strategies[index];
+    }
+
+    function allStrategies() external view returns (address[] memory) {
+        return _strategies;
     }
 
     function isStrategy(address strategy) public view returns (bool) {
@@ -93,12 +89,53 @@ contract StrategyManager is IStrategyManager {
         return caps[id].allocation;
     }
 
+    /// @notice Returns the current assets reported by a strategy.
+    /// @dev This is intentionally read from the strategy, not stored here.
     function strategyAllocation(address strategy) public view returns (uint256) {
         if (!isStrategy(strategy)) return 0;
         return IStrategy(strategy).totalAssets();
     }
 
-    function setStrategyRegistry(address newStrategyRegistry) external onlyGovernance {
+    function strategyInfo(address strategy) external view returns (StrategyInfo memory info) {
+        StrategyConfig memory config = strategyConfig[strategy];
+
+        info.strategy = strategy;
+        info.exists = config.exists;
+        info.active = config.active;
+        info.kind = config.kind;
+        info.capBps = config.capBps;
+        info.targetBps = config.targetBps;
+
+        if (config.exists) {
+            info.totalAssets = IStrategy(strategy).totalAssets();
+            info.availableLiquidity = _availableLiquidityOf(strategy);
+        }
+    }
+
+    function allStrategyInfo() external view returns (StrategyInfo[] memory infos) {
+        uint256 length = _strategies.length;
+        infos = new StrategyInfo[](length);
+
+        for (uint256 i; i < length; ++i) {
+            address strategy = _strategies[i];
+            StrategyConfig memory config = strategyConfig[strategy];
+
+            infos[i] = StrategyInfo({
+                strategy: strategy,
+                exists: config.exists,
+                active: config.active,
+                kind: config.kind,
+                capBps: config.capBps,
+                targetBps: config.targetBps,
+                totalAssets: IStrategy(strategy).totalAssets(),
+                availableLiquidity: _availableLiquidityOf(strategy)
+            });
+        }
+    }
+
+    /* GOVERNANCE FUNCTIONS */
+
+    function setStrategyRegistry(address newStrategyRegistry) external onlyRole(GOVERNANCE_ROLE) {
         if (newStrategyRegistry != address(0)) {
             for (uint256 i; i < _strategies.length; ++i) {
                 require(
@@ -112,31 +149,18 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.SetStrategyRegistry(newStrategyRegistry);
     }
 
-    function addStrategy(address strategy) external onlyGovernance {
-        require(strategy != address(0), ErrorsLib.ZeroAddress());
-        require(
-            strategyRegistry == address(0) || IStrategyRegistry(strategyRegistry).isInRegistry(strategy),
-            ErrorsLib.NotInStrategyRegistry()
-        );
-
-        if (!isStrategy(strategy)) {
-            _strategies.push(strategy);
-            _strategyIndexPlusOne[strategy] = _strategies.length;
-            strategyConfig[strategy] = StrategyConfig({
-                exists: true,
-                active: true,
-                capBps: 0,
-                targetBps: 0,
-                kind: 0
-            });
-        }
-
-        emit EventsLib.AddStrategy(strategy);
+    function addStrategy(address strategy, uint8 kind, uint256 capBps, uint256 targetBps)
+        external
+        onlyRole(GOVERNANCE_ROLE)
+    {
+        _addStrategy(strategy, kind, capBps, targetBps);
     }
 
-    function removeStrategy(address strategy) external onlyGovernance {
+    function removeStrategy(address strategy) external onlyRole(GOVERNANCE_ROLE) {
         uint256 indexPlusOne = _strategyIndexPlusOne[strategy];
         require(indexPlusOne != 0, ErrorsLib.NotStrategy());
+
+        // A strategy must be fully emptied before removal.
         require(strategyAllocation(strategy) == 0, ErrorsLib.ZeroAllocation());
         require(IStrategy(strategy).realAssets() == 0, ErrorsLib.ZeroAllocation());
 
@@ -150,6 +174,7 @@ contract StrategyManager is IStrategyManager {
         }
 
         _strategies.pop();
+
         delete _strategyIndexPlusOne[strategy];
         delete strategyConfig[strategy];
         delete forceDeallocatePenalty[strategy];
@@ -157,13 +182,14 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.RemoveStrategy(strategy);
     }
 
-    function setStrategyActive(address strategy, bool active) external onlyGovernance {
+    function setStrategyActive(address strategy, bool active) external onlyRole(GOVERNANCE_ROLE) {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
+
         strategyConfig[strategy].active = active;
         emit EventsLib.SetStrategyActive(strategy, active);
     }
 
-    function setStrategyCapBps(address strategy, uint256 capBps) external onlyGovernance {
+    function setStrategyCapBps(address strategy, uint256 capBps) external onlyRole(GOVERNANCE_ROLE) {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
         require(capBps <= BPS, ErrorsLib.RelativeCapAboveOne());
 
@@ -171,7 +197,7 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.SetStrategyCapBps(strategy, capBps);
     }
 
-    function setStrategyTargetBps(address strategy, uint256 targetBps) external onlyGovernance {
+    function setStrategyTargetBps(address strategy, uint256 targetBps) external onlyRole(GOVERNANCE_ROLE) {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
         require(targetBps <= BPS, ErrorsLib.RelativeCapAboveOne());
 
@@ -179,13 +205,14 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.SetStrategyTargetBps(strategy, targetBps);
     }
 
-    function setStrategyKind(address strategy, uint8 kind) external onlyGovernance {
+    function setStrategyKind(address strategy, uint8 kind) external onlyRole(GOVERNANCE_ROLE) {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
+
         strategyConfig[strategy].kind = kind;
         emit EventsLib.SetStrategyKind(strategy, kind);
     }
 
-    function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external onlyGovernance {
+    function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external onlyRole(GOVERNANCE_ROLE) {
         bytes32 id = keccak256(idData);
         require(newAbsoluteCap >= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotIncreasing());
 
@@ -193,7 +220,8 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.IncreaseAbsoluteCap(id, idData, newAbsoluteCap);
     }
 
-    function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external onlyGovernanceOrRiskAdmin {
+    function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external {
+        _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
         bytes32 id = keccak256(idData);
         require(newAbsoluteCap <= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotDecreasing());
 
@@ -201,7 +229,7 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.DecreaseAbsoluteCap(msg.sender, id, idData, newAbsoluteCap);
     }
 
-    function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external onlyGovernance {
+    function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external onlyRole(GOVERNANCE_ROLE) {
         bytes32 id = keccak256(idData);
         require(newRelativeCap <= WAD, ErrorsLib.RelativeCapAboveOne());
         require(newRelativeCap >= caps[id].relativeCap, ErrorsLib.RelativeCapNotIncreasing());
@@ -210,7 +238,8 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.IncreaseRelativeCap(id, idData, newRelativeCap);
     }
 
-    function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external onlyGovernanceOrRiskAdmin {
+    function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external {
+        _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
         bytes32 id = keccak256(idData);
         require(newRelativeCap <= caps[id].relativeCap, ErrorsLib.RelativeCapNotDecreasing());
 
@@ -218,7 +247,7 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.DecreaseRelativeCap(msg.sender, id, idData, newRelativeCap);
     }
 
-    function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external onlyGovernance {
+    function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external onlyRole(GOVERNANCE_ROLE) {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
         require(newForceDeallocatePenalty <= MAX_FORCE_DEALLOCATE_PENALTY, ErrorsLib.PenaltyTooHigh());
 
@@ -226,16 +255,16 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.SetForceDeallocatePenalty(strategy, newForceDeallocatePenalty);
     }
 
+    /* VAULT HOOKS */
+
     /// @notice Vault-only cap accounting hook called after Vault.allocate runs IStrategy.allocate.
-    /// @dev Vault holds the assets and orchestrates the strategy call; SM only validates/updates accounting.
+    /// @dev Vault holds the assets and orchestrates the strategy call; this contract only validates and updates accounting.
     function onAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps)
         external
         onlyVault
     {
         StrategyConfig memory config = strategyConfig[strategy];
         require(config.exists && config.active, ErrorsLib.NotStrategy());
-
-        _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
 
         for (uint256 i; i < ids.length; ++i) {
             Caps storage _caps = caps[ids[i]];
@@ -248,6 +277,8 @@ contract StrategyManager is IStrategyManager {
                 ErrorsLib.RelativeCapExceeded()
             );
         }
+
+        _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
 
         emit EventsLib.AfterAllocate(strategy, ids, change, strategyAllocation(strategy));
     }
@@ -266,6 +297,26 @@ contract StrategyManager is IStrategyManager {
         emit EventsLib.AfterDeallocate(strategy, ids, change, strategyAllocation(strategy));
     }
 
+    /* ALLOCATION HELPERS */
+
+    /// @notice Optional rebalance helper.
+    /// @dev This contract still never holds assets. It only calls Vault.allocate/deallocate.
+    ///      You can skip this and let allocators call the Vault directly.
+    /// @dev For Vault.allocate/deallocate to succeed when relayed through here, this SM contract
+    ///      address must hold ALLOCATOR_ROLE (or SENTINEL_ROLE for the deallocate path) in RoleManager.
+    function rebalance(RebalanceAction[] calldata actions) external {
+        _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
+        for (uint256 i; i < actions.length; ++i) {
+            if (actions[i].isAllocate) {
+                IVault(vault).allocate(actions[i].strategy, actions[i].data, actions[i].assets);
+            } else {
+                IVault(vault).deallocate(actions[i].strategy, actions[i].data, actions[i].assets);
+            }
+        }
+    }
+
+    /* AGGREGATE VIEWS */
+
     function totalStrategyAssets() external view returns (uint256 totalAssets) {
         for (uint256 i; i < _strategies.length; ++i) {
             totalAssets += IStrategy(_strategies[i]).totalAssets();
@@ -273,17 +324,96 @@ contract StrategyManager is IStrategyManager {
     }
 
     function availableStrategyLiquidity() external view returns (uint256 liquidity) {
+        for (uint256 i; i < _strategies.length; ++i) {
+            liquidity += _availableLiquidityOf(_strategies[i]);
+        }
+    }
+
+    function totalOnchainStrategyAssets() external view returns (uint256 totalAssets) {
+        for (uint256 i; i < _strategies.length; ++i) {
+            address strategy = _strategies[i];
+
+            if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
+                totalAssets += IStrategy(strategy).totalAssets();
+            }
+        }
+    }
+
+    function availableOnchainStrategyLiquidity() external view returns (uint256 liquidity) {
+        for (uint256 i; i < _strategies.length; ++i) {
+            address strategy = _strategies[i];
+
+            if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
+                liquidity += _availableLiquidityOf(strategy);
+            }
+        }
+    }
+
+    function totalOffchainStrategyAssets() external view returns (uint256 totalAssets) {
+        for (uint256 i; i < _strategies.length; ++i) {
+            address strategy = _strategies[i];
+
+            if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
+                totalAssets += IStrategy(strategy).totalAssets();
+            }
+        }
+    }
+
+    function availableOffchainStrategyLiquidity() external view returns (uint256 liquidity) {
+        for (uint256 i; i < _strategies.length; ++i) {
+            address strategy = _strategies[i];
+
+            if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
+                liquidity += _availableLiquidityOf(strategy);
+            }
+        }
+    }
+
+    /* INTERNAL FUNCTIONS */
+
+    function _addStrategy(address strategy, uint8 kind, uint256 capBps, uint256 targetBps) internal {
+        require(strategy != address(0), ErrorsLib.ZeroAddress());
+        require(capBps <= BPS, ErrorsLib.RelativeCapAboveOne());
+        require(targetBps <= BPS, ErrorsLib.RelativeCapAboveOne());
+        require(
+            strategyRegistry == address(0) || IStrategyRegistry(strategyRegistry).isInRegistry(strategy),
+            ErrorsLib.NotInStrategyRegistry()
+        );
+
+        if (!isStrategy(strategy)) {
+            _strategies.push(strategy);
+            _strategyIndexPlusOne[strategy] = _strategies.length;
+
+            strategyConfig[strategy] = StrategyConfig({
+                exists: true,
+                active: true,
+                capBps: uint16(capBps),
+                targetBps: uint16(targetBps),
+                kind: kind
+            });
+
+            emit EventsLib.AddStrategy(strategy);
+            emit EventsLib.SetStrategyKind(strategy, kind);
+            emit EventsLib.SetStrategyCapBps(strategy, capBps);
+            emit EventsLib.SetStrategyTargetBps(strategy, targetBps);
+        }
+    }
+
+    function _availableLiquidityOf(address strategy) internal view returns (uint256 liquidity) {
         bytes4 selector = bytes4(keccak256("availableLiquidity()"));
 
-        for (uint256 i; i < _strategies.length; ++i) {
-            (bool success, bytes memory data) = _strategies[i].staticcall(abi.encodeWithSelector(selector));
-            if (success && data.length >= 32) liquidity += abi.decode(data, (uint256));
+        (bool success, bytes memory data) = strategy.staticcall(abi.encodeWithSelector(selector));
+        if (success && data.length >= 32) {
+            liquidity = abi.decode(data, (uint256));
         }
     }
 
     function _enforceStrategyCap(address strategy, uint256 capBps, uint256 totalAssetsForCaps) internal view {
         if (capBps == 0) return;
-        require(strategyAllocation(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS), ErrorsLib.RelativeCapExceeded());
-    }
 
+        require(
+            strategyAllocation(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS),
+            ErrorsLib.RelativeCapExceeded()
+        );
+    }
 }

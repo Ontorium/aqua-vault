@@ -3,63 +3,22 @@
 pragma solidity ^0.8.28;
 
 import {ITimelock} from "./interfaces/ITimelock.sol";
+import {AccessManaged} from "./AccessManaged.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
 
-contract Timelock is ITimelock {
-    address public owner;
-    address public curator;
-
-    mapping(address account => bool) public isSentinel;
+/// @notice Delay-based execution wrapper. Holds privileged roles (e.g. GOVERNANCE_ROLE) on behalf of a
+/// curator: the curator schedules a call, anyone may execute after the configured delay.
+/// @dev Role membership (curator/sentinel/governance) lives in RoleManager, NOT here.
+contract Timelock is ITimelock, AccessManaged {
     mapping(address target => bool) public isTarget;
     mapping(address target => mapping(bytes4 selector => uint256 duration)) public timelock;
     mapping(address target => mapping(bytes4 selector => bool isDisabled)) public abdicated;
     mapping(address target => mapping(bytes data => uint256 executableAt)) public executableAt;
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        _;
-    }
+    constructor(address _roleManager) AccessManaged(_roleManager) {}
 
-    modifier onlyCurator() {
-        require(msg.sender == curator, ErrorsLib.Unauthorized());
-        _;
-    }
-
-    modifier onlyCuratorOrSentinel() {
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        _;
-    }
-
-    constructor(address _owner, address _curator) {
-        require(_owner != address(0), ErrorsLib.ZeroAddress());
-        require(_curator != address(0), ErrorsLib.ZeroAddress());
-
-        owner = _owner;
-        curator = _curator;
-
-        emit EventsLib.SetOwner(_owner);
-        emit EventsLib.SetCurator(_curator);
-    }
-
-    function setOwner(address newOwner) external onlyOwner {
-        require(newOwner != address(0), ErrorsLib.ZeroAddress());
-        owner = newOwner;
-        emit EventsLib.SetOwner(newOwner);
-    }
-
-    function setCurator(address newCurator) external onlyOwner {
-        require(newCurator != address(0), ErrorsLib.ZeroAddress());
-        curator = newCurator;
-        emit EventsLib.SetCurator(newCurator);
-    }
-
-    function setIsSentinel(address account, bool newIsSentinel) external onlyOwner {
-        isSentinel[account] = newIsSentinel;
-        emit EventsLib.SetIsSentinel(account, newIsSentinel);
-    }
-
-    function setIsTarget(address target, bool allowed) external onlyOwner {
+    function setIsTarget(address target, bool allowed) external onlyRole(GOVERNANCE_ROLE) {
         require(target != address(0), ErrorsLib.ZeroAddress());
         if (allowed) require(target.code.length != 0, ErrorsLib.NoCode());
 
@@ -67,19 +26,19 @@ contract Timelock is ITimelock {
         emit EventsLib.SetGovernanceTarget(target, allowed);
     }
 
-    function setTimelock(address target, bytes4 selector, uint256 newDuration) external onlyOwner {
+    function setTimelock(address target, bytes4 selector, uint256 newDuration) external onlyRole(GOVERNANCE_ROLE) {
         require(isTarget[target], ErrorsLib.InvalidTarget());
         timelock[target][selector] = newDuration;
         emit EventsLib.SetTimelock(target, selector, newDuration);
     }
 
-    function setAbdicated(address target, bytes4 selector, bool newAbdicated) external onlyOwner {
+    function setAbdicated(address target, bytes4 selector, bool newAbdicated) external onlyRole(GOVERNANCE_ROLE) {
         require(isTarget[target], ErrorsLib.InvalidTarget());
         abdicated[target][selector] = newAbdicated;
         emit EventsLib.SetGovernanceAbdicated(target, selector, newAbdicated);
     }
 
-    function schedule(address target, bytes calldata data) external onlyCurator {
+    function schedule(address target, bytes calldata data) external onlyRole(CURATOR_ROLE) {
         require(isTarget[target], ErrorsLib.InvalidTarget());
         require(executableAt[target][data] == 0, ErrorsLib.DataAlreadyPending());
 
@@ -88,7 +47,8 @@ contract Timelock is ITimelock {
         emit EventsLib.GovernanceSubmit(target, selector, data, executableAt[target][data]);
     }
 
-    function revoke(address target, bytes calldata data) external onlyCuratorOrSentinel {
+    function revoke(address target, bytes calldata data) external {
+        _requireAnyRole(CURATOR_ROLE, SENTINEL_ROLE);
         require(executableAt[target][data] != 0, ErrorsLib.DataNotTimelocked());
 
         delete executableAt[target][data];

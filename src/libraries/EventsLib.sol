@@ -55,12 +55,10 @@ library EventsLib {
     event GovernanceAccept(address indexed target, bytes4 indexed selector, bytes data);
 
     // Configuration events
-    event SetOwner(address indexed newOwner);
-    event SetCurator(address indexed newCurator);
-    event SetIsSentinel(address indexed account, bool newIsSentinel);
+    // @dev Owner/curator/sentinel/allocator membership changes are emitted by RoleManager
+    // as RoleGranted/RoleRevoked, NOT here.
     event SetName(string newName);
     event SetSymbol(string newSymbol);
-    event SetIsAllocator(address indexed account, bool newIsAllocator);
     event SetReceiveSharesGate(address indexed newReceiveSharesGate);
     event SetSendSharesGate(address indexed newSendSharesGate);
     event SetReceiveAssetsGate(address indexed newReceiveAssetsGate);
@@ -94,4 +92,36 @@ library EventsLib {
     event AfterAllocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);
     event AfterDeallocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);
     event Rebalance(address indexed caller, uint256 actionsLength);
+
+    // OffchainBalanceSheet events (emitted from the strategy contract address)
+    event StrategyAllocated(uint256 assets);
+    event StrategyDeallocated(uint256 assets);
+    event CapitalDeployed(uint256 assets, address indexed destination);
+    event ReturnRequested(uint256 assets);
+    event CapitalReturned(uint256 assets);
+    event NAVReported(
+        uint256 reportedAssets,
+        uint256 reportedAvailableLiquidity,
+        uint256 pendingReceivable,
+        bytes32 indexed reportHash,
+        string reportURI,
+        uint64 timestamp
+    );
+    event StalePeriodSet(uint256 stalePeriod);
+
+    // OffchainNAVStrategy config events
+    // @dev Manager/reporter changes are emitted by RoleManager as RoleGranted/RoleRevoked
+    // (using per-strategy scoped role hashes), NOT here.
+    event SetCustodian(address indexed custodian);
+    event SetMaxChangeBps(uint256 maxChangeBps);
+
+    // PriceManager events
+    event PriceManagerUpdate(
+        address indexed vault,
+        address indexed offchainStrategy,
+        uint256 netAssetValue,
+        uint256 totalAssets,
+        uint256 totalSupply,
+        uint256 pricePerShare
+    );
 }
