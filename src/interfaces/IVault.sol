@@ -14,10 +14,20 @@ struct Caps {
     uint128 relativeCap;
 }
 
+enum WithdrawalStatus {
+    Pending,
+    Claimed,
+    Cancelled
+}
+
+/// @dev Packed into 3 storage slots.
 struct WithdrawalRequest {
-    address receiver;
-    uint256 assets;
-    bool claimed;
+    address onBehalf;     // share owner whose shares were burned (also the only one who can cancel)
+    uint64 requestTime;   // block timestamp at request creation
+    WithdrawalStatus status;
+    address receiver;     // who receives the assets on claim
+    uint128 assets;       // assets owed to receiver
+    uint128 shares;       // shares burned (re-minted to onBehalf on cancel)
 }
 
 interface IVault is IERC4626, IERC2612 {
@@ -39,12 +49,23 @@ interface IVault is IERC4626, IERC2612 {
     function performanceFeeRecipient() external view returns (address);
     function managementFee() external view returns (uint96);
     function managementFeeRecipient() external view returns (address);
+    function depositFee() external view returns (uint96);
+    function withdrawalFee() external view returns (uint96);
+    function protocolFeeRecipient() external view returns (address);
     function withdrawalRequests(uint256 requestId)
         external
         view
-        returns (address receiver, uint256 assets, bool claimed);
+        returns (
+            address onBehalf,
+            uint64 requestTime,
+            WithdrawalStatus status,
+            address receiver,
+            uint128 assets,
+            uint128 shares
+        );
     function nextRequestId() external view returns (uint256);
     function pendingClaimableAssets() external view returns (uint256);
+    function paused() external view returns (bool);
 
     // @dev Strategy registry, caps, allocation, per-strategy/per-id queries and aggregate liquidity views
     // are NOT exposed here. Read them directly from StrategyManager (obtainable via strategyManager()).
@@ -71,7 +92,14 @@ interface IVault is IERC4626, IERC2612 {
     function setManagementFee(uint256 newManagementFee) external;
     function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external;
     function setManagementFeeRecipient(address newManagementFeeRecipient) external;
+    function setDepositFee(uint256 newDepositFee) external;
+    function setWithdrawalFee(uint256 newWithdrawalFee) external;
+    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external;
     function setMaxRate(uint256 newMaxRate) external;
+
+    // Pause controls (SENTINEL pauses, GOVERNANCE unpauses)
+    function pause() external;
+    function unpause() external;
 
     // Allocator functions
     function allocate(address strategy, bytes memory data, uint256 assets) external;
@@ -87,6 +115,9 @@ interface IVault is IERC4626, IERC2612 {
 
     // Withdrawal queue
     function claim(uint256 requestId) external returns (uint256 assets);
+    function cancelWithdrawal(uint256 requestId) external returns (uint256 shares);
+    function isClaimable(uint256 requestId) external view returns (bool);
+    function availableLiquidity() external view returns (uint256);
 
     // Force deallocate
     function forceDeallocate(address strategy, bytes memory data, uint256 assets, address onBehalf)

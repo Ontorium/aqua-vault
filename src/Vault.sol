@@ -6,7 +6,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IVault, WithdrawalRequest} from "./interfaces/IVault.sol";
+import {IVault, WithdrawalRequest, WithdrawalStatus} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {AccessManaged} from "./AccessManaged.sol";
@@ -65,6 +65,12 @@ contract Vault is IVault, AccessManaged {
     address public performanceFeeRecipient;
     uint96 public managementFee;
     address public managementFeeRecipient;
+    /// @dev Charged on deposit/mint (WAD-scaled, e.g. 1e16 = 1%). Routed to protocolFeeRecipient.
+    uint96 public depositFee;
+    /// @dev Charged on withdraw/redeem (WAD-scaled). Routed to protocolFeeRecipient.
+    uint96 public withdrawalFee;
+    /// @dev Treasury for principal-side fees (deposit/withdrawal). Set/changed via TREASURY-style governance.
+    address public protocolFeeRecipient;
 
     /* WITHDRAWAL QUEUE STORAGE */
 
@@ -73,6 +79,17 @@ contract Vault is IVault, AccessManaged {
     /// @dev Assets earmarked for unclaimed withdrawal requests. Subtracted from idle balance when
     /// computing liquidity available for immediate withdrawals and from realAssets in interest accrual.
     uint256 public pendingClaimableAssets;
+
+    /* PAUSE STORAGE */
+
+    /// @dev When true, new inflows and strategy allocations are blocked. Withdrawals (withdraw/redeem/
+    /// claim/forceDeallocate) remain open so users can always exit. SENTINEL pauses, GOVERNANCE unpauses.
+    bool public paused;
+
+    modifier whenNotPaused() {
+        require(!paused, ErrorsLib.Paused());
+        _;
+    }
 
     /* GETTERS */
 
@@ -201,6 +218,47 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.SetPerformanceFeeRecipient(newPerformanceFeeRecipient);
     }
 
+    /* PAUSE CONTROLS */
+
+    /// @notice Emergency-pause new inflows and allocations. Withdrawals stay open.
+    /// @dev SENTINEL can pause for fast response; GOVERNANCE must unpause to confirm safety.
+    function pause() external onlyRole(SENTINEL_ROLE) {
+        paused = true;
+        emit EventsLib.Paused(msg.sender);
+    }
+
+    function unpause() external onlyRole(GOVERNANCE_ROLE) {
+        paused = false;
+        emit EventsLib.Unpaused(msg.sender);
+    }
+
+    function setDepositFee(uint256 newDepositFee) external onlyRole(GOVERNANCE_ROLE) {
+        require(newDepositFee <= MAX_DEPOSIT_FEE, ErrorsLib.FeeTooHigh());
+        require(protocolFeeRecipient != address(0) || newDepositFee == 0, ErrorsLib.FeeInvariantBroken());
+
+        // forge-lint: disable-next-item(unsafe-typecast) safe because 2**96 > MAX_DEPOSIT_FEE.
+        depositFee = uint96(newDepositFee);
+        emit EventsLib.SetDepositFee(newDepositFee);
+    }
+
+    function setWithdrawalFee(uint256 newWithdrawalFee) external onlyRole(GOVERNANCE_ROLE) {
+        require(newWithdrawalFee <= MAX_WITHDRAWAL_FEE, ErrorsLib.FeeTooHigh());
+        require(protocolFeeRecipient != address(0) || newWithdrawalFee == 0, ErrorsLib.FeeInvariantBroken());
+
+        // forge-lint: disable-next-item(unsafe-typecast) safe because 2**96 > MAX_WITHDRAWAL_FEE.
+        withdrawalFee = uint96(newWithdrawalFee);
+        emit EventsLib.SetWithdrawalFee(newWithdrawalFee);
+    }
+
+    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
+        require(
+            newProtocolFeeRecipient != address(0) || (depositFee == 0 && withdrawalFee == 0),
+            ErrorsLib.FeeInvariantBroken()
+        );
+        protocolFeeRecipient = newProtocolFeeRecipient;
+        emit EventsLib.SetProtocolFeeRecipient(newProtocolFeeRecipient);
+    }
+
     function setManagementFeeRecipient(address newManagementFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
         require(newManagementFeeRecipient != address(0) || managementFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -212,7 +270,11 @@ contract Vault is IVault, AccessManaged {
 
     /* ALLOCATOR FUNCTIONS */
 
-    function allocate(address strategy, bytes memory data, uint256 assets) external onlyRole(ALLOCATOR_ROLE) {
+    function allocate(address strategy, bytes memory data, uint256 assets)
+        external
+        whenNotPaused
+        onlyRole(ALLOCATOR_ROLE)
+    {
         allocateInternal(strategy, data, assets);
     }
 
@@ -335,44 +397,50 @@ contract Vault is IVault, AccessManaged {
         if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
     }
 
-    /// @dev Returns previewed minted shares.
+    /// @dev Returns previewed minted shares (depositFee deducted from input assets).
     function previewDeposit(uint256 assets) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 netAssets = assets - assets.mulDivUp(depositFee, WAD);
+        return netAssets.mulDivDown(newTotalSupply + virtualShares, newTotalAssets + 1);
+    }
+
+    /// @dev Returns previewed deposited assets (caller pays gross = netAssets + depositFee).
+    function previewMint(uint256 shares) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 netAssets = shares.mulDivUp(newTotalAssets + 1, newTotalSupply + virtualShares);
+        return depositFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - depositFee);
+    }
+
+    /// @dev Returns previewed redeemed shares (caller burns gross to receive net assets after withdrawalFee).
+    function previewWithdraw(uint256 assets) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 grossAssets = withdrawalFee == 0 ? assets : assets.mulDivUp(WAD, WAD - withdrawalFee);
+        return grossAssets.mulDivUp(newTotalSupply + virtualShares, newTotalAssets + 1);
+    }
+
+    /// @dev Returns previewed withdrawn assets (receiver gets net after withdrawalFee).
+    function previewRedeem(uint256 shares) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 grossAssets = shares.mulDivDown(newTotalAssets + 1, newTotalSupply + virtualShares);
+        return grossAssets - grossAssets.mulDivUp(withdrawalFee, WAD);
+    }
+
+    /// @dev Returns corresponding shares (rounded down) at current price. Fee-agnostic per ERC-4626 spec.
+    function convertToShares(uint256 assets) external view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
         return assets.mulDivDown(newTotalSupply + virtualShares, newTotalAssets + 1);
     }
 
-    /// @dev Returns previewed deposited assets.
-    function previewMint(uint256 shares) public view returns (uint256) {
-        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
-        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
-        return shares.mulDivUp(newTotalAssets + 1, newTotalSupply + virtualShares);
-    }
-
-    /// @dev Returns previewed redeemed shares.
-    function previewWithdraw(uint256 assets) public view returns (uint256) {
-        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
-        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
-        return assets.mulDivUp(newTotalSupply + virtualShares, newTotalAssets + 1);
-    }
-
-    /// @dev Returns previewed withdrawn assets.
-    function previewRedeem(uint256 shares) public view returns (uint256) {
+    /// @dev Returns corresponding assets (rounded down) at current price. Fee-agnostic per ERC-4626 spec.
+    function convertToAssets(uint256 shares) external view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
         return shares.mulDivDown(newTotalAssets + 1, newTotalSupply + virtualShares);
-    }
-
-    /// @dev Returns corresponding shares (rounded down).
-    /// @dev Takes into account performance and management fees.
-    function convertToShares(uint256 assets) external view returns (uint256) {
-        return previewDeposit(assets);
-    }
-
-    /// @dev Returns corresponding assets (rounded down).
-    /// @dev Takes into account performance and management fees.
-    function convertToAssets(uint256 shares) external view returns (uint256) {
-        return previewRedeem(shares);
     }
 
     /* MAX FUNCTIONS */
@@ -399,54 +467,74 @@ contract Vault is IVault, AccessManaged {
 
     /* USER MAIN FUNCTIONS */
 
-    /// @dev Returns minted shares.
-    function deposit(uint256 assets, address onBehalf) external returns (uint256) {
+    /// @dev Charges `depositFee` on the way in; returns shares minted for the net (post-fee) amount.
+    function deposit(uint256 assets, address onBehalf) external whenNotPaused returns (uint256) {
         accrueInterest();
         uint256 shares = previewDeposit(assets);
-        enter(assets, shares, onBehalf);
+        uint256 fee = assets.mulDivUp(depositFee, WAD);
+        uint256 netAssets = assets - fee;
+        _enter(assets, netAssets, fee, shares, onBehalf);
         return shares;
     }
 
-    /// @dev Returns deposited assets.
-    function mint(uint256 shares, address onBehalf) external returns (uint256) {
+    /// @dev Mints exactly `shares` to onBehalf. Caller pays grossAssets = netAssets + fee.
+    function mint(uint256 shares, address onBehalf) external whenNotPaused returns (uint256) {
         accrueInterest();
-        uint256 assets = previewMint(shares);
-        enter(assets, shares, onBehalf);
-        return assets;
+        uint256 grossAssets = previewMint(shares);
+        uint256 fee = grossAssets.mulDivUp(depositFee, WAD);
+        uint256 netAssets = grossAssets - fee;
+        _enter(grossAssets, netAssets, fee, shares, onBehalf);
+        return grossAssets;
     }
 
-    /// @dev Internal function for deposit and mint.
-    function enter(uint256 assets, uint256 shares, address onBehalf) internal {
+    /// @dev Internal entry path. `assets` is what msg.sender pays in; `netAssets` is what backs new shares.
+    function _enter(uint256 assets, uint256 netAssets, uint256 fee, uint256 shares, address onBehalf) internal {
         require(canReceiveShares(onBehalf), ErrorsLib.CannotReceiveShares());
         require(canSendAssets(msg.sender), ErrorsLib.CannotSendAssets());
 
         SafeERC20Lib.safeTransferFrom(asset, msg.sender, address(this), assets);
+        if (fee > 0) {
+            require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
+            SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
+        }
         createShares(onBehalf, shares);
-        _totalAssets += assets.toUint128();
-        emit EventsLib.Deposit(msg.sender, onBehalf, assets, shares);
+        _totalAssets += netAssets.toUint128();
+        emit EventsLib.Deposit(msg.sender, onBehalf, netAssets, shares);
     }
 
-    /// @dev Returns redeemed shares.
+    /// @dev `assets` is what the receiver ends up with after withdrawalFee. Caller burns shares for grossAssets.
     function withdraw(uint256 assets, address receiver, address onBehalf) public returns (uint256) {
         accrueInterest();
         uint256 shares = previewWithdraw(assets);
-        exit(assets, shares, receiver, onBehalf);
+        uint256 grossAssets =
+            withdrawalFee == 0 ? assets : assets.mulDivUp(WAD, WAD - withdrawalFee);
+        uint256 fee = grossAssets - assets;
+        _exit(grossAssets, assets, fee, shares, receiver, onBehalf);
         return shares;
     }
 
-    /// @dev Returns withdrawn assets.
+    /// @dev Burns `shares` from onBehalf. Receiver gets netAssets after fee.
     function redeem(uint256 shares, address receiver, address onBehalf) external returns (uint256) {
         accrueInterest();
-        uint256 assets = previewRedeem(shares);
-        exit(assets, shares, receiver, onBehalf);
-        return assets;
+        uint256 netAssets = previewRedeem(shares);
+        uint256 grossAssets =
+            withdrawalFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - withdrawalFee);
+        uint256 fee = grossAssets - netAssets;
+        _exit(grossAssets, netAssets, fee, shares, receiver, onBehalf);
+        return netAssets;
     }
 
-    /// @dev Internal function for withdraw and redeem.
-    /// @dev If idle liquidity (vault balance minus assets reserved for unclaimed withdrawal requests) covers the
-    /// requested amount, assets are transferred immediately. Otherwise shares are burned now and a withdrawal request
-    /// is created for the user to claim once allocator returns enough assets to the vault.
-    function exit(uint256 assets, uint256 shares, address receiver, address onBehalf) internal {
+    /// @dev Internal exit path. `assetsOut` total leaves the vault (split between `netAssets` to receiver and `fee`).
+    /// @dev If idle liquidity (vault balance minus pending withdrawal claims) covers `assetsOut`, transfer immediately.
+    /// Otherwise burn shares now and queue a withdrawal request for the user to claim later.
+    function _exit(
+        uint256 assetsOut,
+        uint256 netAssets,
+        uint256 fee,
+        uint256 shares,
+        address receiver,
+        address onBehalf
+    ) internal {
         require(canSendShares(onBehalf), ErrorsLib.CannotSendShares());
         require(canReceiveAssets(receiver), ErrorsLib.CannotReceiveAssets());
 
@@ -456,40 +544,97 @@ contract Vault is IVault, AccessManaged {
         }
 
         deleteShares(onBehalf, shares);
-        _totalAssets -= assets.toUint128();
+        _totalAssets -= assetsOut.toUint128();
 
         uint256 idleAssets = IERC20(asset).balanceOf(address(this));
-        uint256 availableLiquidity = idleAssets.zeroFloorSub(pendingClaimableAssets);
+        uint256 effectiveIdle = idleAssets.zeroFloorSub(pendingClaimableAssets);
 
-        if (availableLiquidity >= assets) {
-            SafeERC20Lib.safeTransfer(asset, receiver, assets);
-            emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, assets, shares);
+        if (effectiveIdle >= assetsOut) {
+            // Immediate path: send fee then net to receiver.
+            if (fee > 0) {
+                require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
+                SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
+            }
+            SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
+            emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, netAssets, shares);
         } else {
+            // Queue path: record full assetsOut so cancel can restore everything; fee will be settled at claim time.
             uint256 requestId = nextRequestId++;
-            withdrawalRequests[requestId] = WithdrawalRequest({receiver: receiver, assets: assets, claimed: false});
-            pendingClaimableAssets += assets;
-            emit EventsLib.WithdrawalRequested(requestId, msg.sender, receiver, onBehalf, assets, shares);
+            withdrawalRequests[requestId] = WithdrawalRequest({
+                onBehalf: onBehalf,
+                requestTime: uint64(block.timestamp),
+                status: WithdrawalStatus.Pending,
+                receiver: receiver,
+                assets: assetsOut.toUint128(),
+                shares: shares.toUint128()
+            });
+            pendingClaimableAssets += assetsOut;
+            emit EventsLib.WithdrawalRequested(requestId, msg.sender, receiver, onBehalf, assetsOut, shares);
         }
     }
 
-    /// @dev Settles a withdrawal request once enough idle liquidity is available in the vault.
-    /// @dev Callable by anyone — assets are transferred to the receiver stored on the request.
-    /// @dev Reverts if the request is already claimed or if idle liquidity is insufficient.
+    /// @dev Settles a Pending withdrawal request once enough idle liquidity is available.
+    /// @dev Callable by anyone — assets go to the receiver stored on the request; protocol fee (if any) to recipient.
     function claim(uint256 requestId) external returns (uint256) {
         WithdrawalRequest storage request = withdrawalRequests[requestId];
-        require(request.receiver != address(0), ErrorsLib.InvalidRequest());
-        require(!request.claimed, ErrorsLib.RequestAlreadyClaimed());
+        require(request.status == WithdrawalStatus.Pending, ErrorsLib.RequestNotPending());
 
-        uint256 assets = request.assets;
-        require(IERC20(asset).balanceOf(address(this)) >= assets, ErrorsLib.InsufficientLiquidity());
+        uint256 assetsOut = request.assets;
+        require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
 
-        request.claimed = true;
-        pendingClaimableAssets -= assets;
+        request.status = WithdrawalStatus.Claimed;
+        pendingClaimableAssets -= assetsOut;
+
+        // Re-derive fee from current `withdrawalFee` for the queued amount.
+        uint256 fee = assetsOut.mulDivUp(withdrawalFee, WAD);
+        uint256 netAssets = assetsOut - fee;
+        if (fee > 0) {
+            require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
+            SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
+        }
 
         address receiver = request.receiver;
-        SafeERC20Lib.safeTransfer(asset, receiver, assets);
-        emit EventsLib.WithdrawalClaimed(requestId, receiver, assets);
-        return assets;
+        SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
+        emit EventsLib.WithdrawalClaimed(requestId, receiver, netAssets);
+        return netAssets;
+    }
+
+    /// @dev Cancels a Pending withdrawal request. Only callable by the `onBehalf` whose shares were burned.
+    /// Re-mints the original shares and restores accounting, undoing the request.
+    function cancelWithdrawal(uint256 requestId) external returns (uint256) {
+        WithdrawalRequest storage request = withdrawalRequests[requestId];
+        require(request.status == WithdrawalStatus.Pending, ErrorsLib.RequestNotPending());
+        require(msg.sender == request.onBehalf, ErrorsLib.Unauthorized());
+
+        request.status = WithdrawalStatus.Cancelled;
+
+        uint256 assets = request.assets;
+        uint256 shares = request.shares;
+        address onBehalf = request.onBehalf;
+
+        pendingClaimableAssets -= assets;
+        _totalAssets += uint128(assets);
+        createShares(onBehalf, shares);
+
+        emit EventsLib.WithdrawalCancelled(requestId, onBehalf, shares, assets);
+        return shares;
+    }
+
+    /// @notice Returns true iff a Pending request currently has enough idle liquidity to be claimed.
+    function isClaimable(uint256 requestId) external view returns (bool) {
+        WithdrawalRequest storage request = withdrawalRequests[requestId];
+        if (request.status != WithdrawalStatus.Pending) return false;
+        return IERC20(asset).balanceOf(address(this)) >= request.assets;
+    }
+
+    /// @notice Aggregate liquidity immediately available for new withdrawals:
+    /// vault idle balance (minus pending queue obligations) plus on-demand strategy liquidity.
+    function availableLiquidity() external view returns (uint256) {
+        uint256 idle = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
+        if (strategyManager != address(0)) {
+            idle += IStrategyManager(strategyManager).availableStrategyLiquidity();
+        }
+        return idle;
     }
 
     /// @dev Returns shares withdrawn as penalty.

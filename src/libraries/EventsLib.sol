@@ -28,9 +28,14 @@ library EventsLib {
         uint256 shares
     );
     event WithdrawalClaimed(uint256 indexed requestId, address indexed receiver, uint256 assets);
+    event WithdrawalCancelled(uint256 indexed requestId, address indexed onBehalf, uint256 shares, uint256 assets);
 
     // Vault creation events
     event Constructor(address indexed owner, address indexed asset);
+
+    // Pause events
+    event Paused(address indexed sender);
+    event Unpaused(address indexed sender);
 
     // Allocation events
     event Allocate(address indexed sender, address indexed strategy, uint256 assets, bytes32[] ids, int256 change);
@@ -75,6 +80,10 @@ library EventsLib {
     event SetPerformanceFeeRecipient(address indexed newPerformanceFeeRecipient);
     event SetManagementFee(uint256 newManagementFee);
     event SetManagementFeeRecipient(address indexed newManagementFeeRecipient);
+    event SetDepositFee(uint256 newDepositFee);
+    event SetWithdrawalFee(uint256 newWithdrawalFee);
+    event SetProtocolFeeRecipient(address indexed newProtocolFeeRecipient);
+    event SetMinReportInterval(uint256 newMinReportInterval);
     event DecreaseAbsoluteCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newAbsoluteCap);
     event IncreaseAbsoluteCap(bytes32 indexed id, bytes idData, uint256 newAbsoluteCap);
     event DecreaseRelativeCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newRelativeCap);

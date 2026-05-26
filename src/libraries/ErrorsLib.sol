@@ -35,6 +35,7 @@ library ErrorsLib {
     error NoCode();
     error NotStrategy();
     error NotInStrategyRegistry();
+    error Paused();
     error PenaltyTooHigh();
     error PermitDeadlineExpired();
     error RelativeCapAboveOne();
@@ -44,6 +45,8 @@ library ErrorsLib {
     error RequestAlreadyClaimed();
     error RequestExceedsAvailableLiquidity();
     error RequestExceedsReportedAssets();
+    error RequestNotPending();
+    error ReportTooSoon();
     error ReturnNotReceived();
     error TimelockNotDecreasing();
     error TimelockNotExpired();
