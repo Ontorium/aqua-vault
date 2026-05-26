@@ -7,8 +7,6 @@ import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 
 /// @notice Minimal OZ-compatible AccessControl. Centralized role registry shared by Vault,
 /// StrategyManager, strategies, and any future modules.
-/// @dev Event signatures and function names match OpenZeppelin's AccessControl so indexers and
-/// SDKs built for OZ work as-is.
 contract RoleManager is IRoleManager {
     bytes32 public constant override DEFAULT_ADMIN_ROLE = 0x00;
 

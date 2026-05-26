@@ -23,6 +23,8 @@ abstract contract OffchainBalanceSheet {
         uint128 pendingReceivable;
         uint64 lastReportTime;
         uint64 stalePeriod;
+        // Minimum seconds between successive NAV reports (anti-spam / rate limit).
+        uint64 minReportInterval;
         bytes32 reportHash;
     }
 
@@ -57,6 +59,10 @@ abstract contract OffchainBalanceSheet {
         return _position.stalePeriod;
     }
 
+    function minReportInterval() public view returns (uint256) {
+        return _position.minReportInterval;
+    }
+
     function reportHash() public view returns (bytes32) {
         return _position.reportHash;
     }
@@ -73,6 +79,11 @@ abstract contract OffchainBalanceSheet {
     function _setStalePeriod(uint256 newStalePeriod) internal {
         _position.stalePeriod = _toUint64(newStalePeriod);
         emit EventsLib.StalePeriodSet(newStalePeriod);
+    }
+
+    function _setMinReportInterval(uint256 newMinReportInterval) internal {
+        _position.minReportInterval = _toUint64(newMinReportInterval);
+        emit EventsLib.SetMinReportInterval(newMinReportInterval);
     }
 
     function _recordAllocation(uint256 assets) internal {
@@ -151,6 +162,14 @@ abstract contract OffchainBalanceSheet {
         uint256 maxChangeBps
     ) internal {
         require(newReportedAvailableLiquidity <= newReportedAssets, ErrorsLib.AvailableExceedsReportedAssets());
+
+        // Rate-limit consecutive NAV updates.
+        if (_position.lastReportTime != 0 && _position.minReportInterval != 0) {
+            require(
+                block.timestamp >= uint256(_position.lastReportTime) + uint256(_position.minReportInterval),
+                ErrorsLib.ReportTooSoon()
+            );
+        }
 
         uint256 oldOffchainValue = uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
         uint256 newOffchainValue = newReportedAssets + newPendingReceivable;
