@@ -2,27 +2,32 @@
 // Copyright (c) 2026 Ontorium
 pragma solidity ^0.8.28;
 
-import {Script, console} from "../lib/forge-std/src/Script.sol";
+import {console} from "../lib/forge-std/src/Script.sol";
 
 import {VaultFactory} from "../src/VaultFactory.sol";
 import {Vault} from "../src/Vault.sol";
 import {StrategyManager} from "../src/StrategyManager.sol";
 import {RoleManager} from "../src/RoleManager.sol";
 import {Timelock} from "../src/Timelock.sol";
+import {EnvSigner} from "./EnvSigner.sol";
 
-/// @notice Core deployment: a `VaultFactory`, then one vault stack (Vault + StrategyManager +
-/// RoleManager + Timelock) atomically wired by the factory.
+/// @notice Core deployment: a `VaultFactory` (which deploys the Vault + RoleManager), then the
+/// StrategyManager + Timelock, wired up to mirror the original atomic factory.
 ///
-/// Environment variables:
-///   PRIVATE_KEY        (required by forge for broadcasting)
-///   OWNER              (optional) DEFAULT_ADMIN_ROLE holder. Defaults to the broadcast sender.
+/// Environment variables (signer):
+///   PRIVATE_KEY        (optional) raw key for broadcasting; OR
+///   MNEMONIC           (optional) seed phrase; uses MNEMONIC_INDEX (default 0).
+///   If neither is set, falls back to the CLI signer (--private-key/--mnemonic/--account).
+/// Other environment variables:
+///   OWNER              (optional) DEFAULT_ADMIN_ROLE holder. Defaults to the signer. Must equal the
+///                      signer for the wiring grants below to succeed.
 ///   ASSET              (optional) underlying ERC20. If unset, deploys a mintable MockToken (testnets only).
 ///   SALT               (optional) CREATE2 salt for the Vault address. Defaults to 0.
 ///   FACTORY            (optional) reuse an already-deployed VaultFactory instead of deploying a new one.
 ///
 /// Usage:
 ///   forge script script/Deploy.s.sol:Deploy --rpc-url $RPC --broadcast --verify
-contract Deploy is Script {
+contract Deploy is EnvSigner {
     function run()
         external
         returns (
@@ -33,12 +38,12 @@ contract Deploy is Script {
             address timelock
         )
     {
-        address deployer = msg.sender;
-        address owner = vm.envOr("OWNER", deployer);
         bytes32 salt = bytes32(vm.envOr("SALT", uint256(0)));
         address existingFactory = vm.envOr("FACTORY", address(0));
 
-        vm.startBroadcast();
+        // Signer from PRIVATE_KEY / MNEMONIC (see EnvSigner), or the CLI signer if neither is set.
+        address deployer = _startBroadcastFromEnv();
+        address owner = vm.envOr("OWNER", deployer);
 
         // 1. Underlying asset: use ASSET if provided, otherwise deploy a mock (testnet convenience).
         address asset = vm.envOr("ASSET", address(0));

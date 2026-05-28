@@ -2,8 +2,9 @@
 // Copyright (c) 2026 Ontorium
 pragma solidity ^0.8.28;
 
-import {Script, console} from "../lib/forge-std/src/Script.sol";
+import {console} from "../lib/forge-std/src/Script.sol";
 import {VmSafe} from "../lib/forge-std/src/Vm.sol";
+import {EnvSigner} from "./EnvSigner.sol";
 
 import {Vault} from "../src/Vault.sol";
 import {StrategyManager} from "../src/StrategyManager.sol";
@@ -27,15 +28,15 @@ interface IMintableERC20 {
 ///   - Live (--broadcast): sends real transactions. Writes reports/_header.md + reports/_body.md;
 ///     run script/BuildReport.s.sol afterwards to merge the real tx hashes from the broadcast log.
 ///
-/// Required env: PRIVATE_KEY, VAULT, STRATEGY_MANAGER, ROLE_MANAGER, ASSET_ADDR.
-/// Optional env: DEPOSIT_ASSETS, MINT_SHARES, ALLOCATE_ASSETS.
+/// Required env: (PRIVATE_KEY or MNEMONIC), VAULT, STRATEGY_MANAGER, ROLE_MANAGER, ASSET_ADDR.
+/// Optional env: MNEMONIC_INDEX, DEPOSIT_ASSETS, MINT_SHARES, ALLOCATE_ASSETS.
 ///
 /// Usage:
 ///   set -a && source .env && set +a
 ///   mkdir -p reports
 ///   # fork:  forge script script/IntegrationReport.s.sol --rpc-url arbitrum_sepolia
 ///   # live:  forge script script/IntegrationReport.s.sol --rpc-url arbitrum_sepolia --broadcast
-contract IntegrationReport is Script {
+contract IntegrationReport is EnvSigner {
     Vault internal vault;
     StrategyManager internal sm;
     RoleManager internal rm;
@@ -58,9 +59,6 @@ contract IntegrationReport is Script {
     }
 
     function run() external {
-        uint256 pk = vm.envUint("PRIVATE_KEY");
-        user = vm.addr(pk);
-
         vault = Vault(vm.envAddress("VAULT"));
         sm = StrategyManager(vm.envAddress("STRATEGY_MANAGER"));
         rm = RoleManager(vm.envAddress("ROLE_MANAGER"));
@@ -72,7 +70,8 @@ contract IntegrationReport is Script {
 
         live = vm.isContext(VmSafe.ForgeContext.ScriptBroadcast);
 
-        vm.startBroadcast(pk);
+        // Signer comes from PRIVATE_KEY or MNEMONIC (see EnvSigner); also sets `user`.
+        user = _startBroadcastFromEnv();
 
         // 0. Self-grant operational roles. `user` must hold DEFAULT_ADMIN_ROLE (the deploy `owner`).
         Snap memory a = _snap();
