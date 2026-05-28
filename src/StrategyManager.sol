@@ -137,11 +137,13 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     function setStrategyRegistry(address newStrategyRegistry) external onlyRole(GOVERNANCE_ROLE) {
         if (newStrategyRegistry != address(0)) {
-            for (uint256 i; i < _strategies.length; ++i) {
+            uint256 len = _strategies.length;
+            for (uint256 i; i < len;) {
                 require(
                     IStrategyRegistry(newStrategyRegistry).isInRegistry(_strategies[i]),
                     ErrorsLib.NotInStrategyRegistry()
                 );
+                unchecked { ++i; }
             }
         }
 
@@ -266,7 +268,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         StrategyConfig memory config = strategyConfig[strategy];
         require(config.exists && config.active, ErrorsLib.NotStrategy());
 
-        for (uint256 i; i < ids.length; ++i) {
+        uint256 len = ids.length;
+        for (uint256 i; i < len;) {
             Caps storage _caps = caps[ids[i]];
             _caps.allocation = (int256(_caps.allocation) + change).toUint256();
 
@@ -276,6 +279,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                 _caps.relativeCap == WAD || _caps.allocation <= totalAssetsForCaps.mulDivDown(_caps.relativeCap, WAD),
                 ErrorsLib.RelativeCapExceeded()
             );
+            unchecked { ++i; }
         }
 
         _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
@@ -288,10 +292,12 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     function onDeallocate(address strategy, bytes32[] memory ids, int256 change) external onlyVault {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
 
-        for (uint256 i; i < ids.length; ++i) {
+        uint256 len = ids.length;
+        for (uint256 i; i < len;) {
             Caps storage _caps = caps[ids[i]];
             require(_caps.allocation > 0, ErrorsLib.ZeroAllocation());
             _caps.allocation = (int256(_caps.allocation) + change).toUint256();
+            unchecked { ++i; }
         }
 
         emit EventsLib.AfterDeallocate(strategy, ids, change, strategyAllocation(strategy));
@@ -320,54 +326,62 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     /* AGGREGATE VIEWS */
 
     function totalStrategyAssets() external view returns (uint256 totalAssets) {
-        for (uint256 i; i < _strategies.length; ++i) {
+        uint256 len = _strategies.length;
+        for (uint256 i; i < len;) {
             totalAssets += IStrategy(_strategies[i]).totalAssets();
+            unchecked { ++i; }
         }
     }
 
     function availableStrategyLiquidity() external view returns (uint256 liquidity) {
-        for (uint256 i; i < _strategies.length; ++i) {
+        uint256 len = _strategies.length;
+        for (uint256 i; i < len;) {
             liquidity += _availableLiquidityOf(_strategies[i]);
+            unchecked { ++i; }
         }
     }
 
     function totalOnchainStrategyAssets() external view returns (uint256 totalAssets) {
-        for (uint256 i; i < _strategies.length; ++i) {
+        uint256 len = _strategies.length;
+        for (uint256 i; i < len;) {
             address strategy = _strategies[i];
-
             if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
                 totalAssets += IStrategy(strategy).totalAssets();
             }
+            unchecked { ++i; }
         }
     }
 
     function availableOnchainStrategyLiquidity() external view returns (uint256 liquidity) {
-        for (uint256 i; i < _strategies.length; ++i) {
+        uint256 len = _strategies.length;
+        for (uint256 i; i < len;) {
             address strategy = _strategies[i];
-
             if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
                 liquidity += _availableLiquidityOf(strategy);
             }
+            unchecked { ++i; }
         }
     }
 
     function totalOffchainStrategyAssets() external view returns (uint256 totalAssets) {
-        for (uint256 i; i < _strategies.length; ++i) {
+        uint256 len = _strategies.length;
+        for (uint256 i; i < len;) {
             address strategy = _strategies[i];
-
             if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
                 totalAssets += IStrategy(strategy).totalAssets();
             }
+            unchecked { ++i; }
         }
     }
 
     function availableOffchainStrategyLiquidity() external view returns (uint256 liquidity) {
-        for (uint256 i; i < _strategies.length; ++i) {
+        uint256 len = _strategies.length;
+        for (uint256 i; i < len;) {
             address strategy = _strategies[i];
-
             if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
                 liquidity += _availableLiquidityOf(strategy);
             }
+            unchecked { ++i; }
         }
     }
 

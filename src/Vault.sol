@@ -115,13 +115,15 @@ contract Vault is IVault, AccessManaged {
     /// @dev Does not return anything, because accounts who would use the return data would be contracts, which can do
     /// the multicall themselves.
     function multicall(bytes[] calldata data) external {
-        for (uint256 i = 0; i < data.length; i++) {
+        uint256 len = data.length;
+        for (uint256 i; i < len;) {
             (bool success, bytes memory returnData) = address(this).delegatecall(data[i]);
             if (!success) {
                 assembly ("memory-safe") {
                     revert(add(32, returnData), mload(returnData))
                 }
             }
+            unchecked { ++i; }
         }
     }
 
@@ -282,14 +284,15 @@ contract Vault is IVault, AccessManaged {
     }
 
     function allocateInternal(address strategy, bytes memory data, uint256 assets) internal {
-        require(strategyManager != address(0), ErrorsLib.ZeroAddress());
+        address _strategyManager = strategyManager;
+        require(_strategyManager != address(0), ErrorsLib.ZeroAddress());
 
         accrueInterest();
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).allocate(data, assets, msg.sig, msg.sender);
 
-        IStrategyManager(strategyManager).onAllocate(strategy, ids, change, firstTotalAssets);
+        IStrategyManager(_strategyManager).onAllocate(strategy, ids, change, firstTotalAssets);
 
         emit EventsLib.Allocate(msg.sender, strategy, assets, ids, change);
     }
@@ -303,12 +306,13 @@ contract Vault is IVault, AccessManaged {
         internal
         returns (bytes32[] memory ids)
     {
-        require(strategyManager != address(0), ErrorsLib.ZeroAddress());
+        address _strategyManager = strategyManager;
+        require(_strategyManager != address(0), ErrorsLib.ZeroAddress());
 
         int256 change;
         (ids, change) = IStrategy(strategy).deallocate(data, assets, msg.sig, msg.sender);
 
-        IStrategyManager(strategyManager).onDeallocate(strategy, ids, change);
+        IStrategyManager(_strategyManager).onDeallocate(strategy, ids, change);
 
         SafeERC20Lib.safeTransferFrom(asset, strategy, address(this), assets);
         emit EventsLib.Deallocate(msg.sender, strategy, assets, ids, change);
