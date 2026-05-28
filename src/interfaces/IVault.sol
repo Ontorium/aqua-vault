@@ -102,6 +102,9 @@ interface IVault is IERC4626, IERC2612 {
     function claim(address onBehalf) external returns (uint256 assets);
     /// @notice Cancels the caller's accumulated pending withdrawal in full. Only `onBehalf` themself.
     function cancelWithdrawal() external returns (uint256 shares);
+    /// @notice Cancels `assetsToCancel` from the caller's pending withdrawal. Shares are restored
+    /// pro-rata to the slot's `assets:shares` ratio (rounded down).
+    function cancelWithdrawal(uint256 assetsToCancel) external returns (uint256 shares);
     function isClaimable(address onBehalf) external view returns (bool);
     function availableLiquidity() external view returns (uint256);
 

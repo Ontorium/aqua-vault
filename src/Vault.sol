@@ -605,22 +605,46 @@ contract Vault is IVault, AccessManaged {
 
     /// @notice Cancels the caller's full pending withdrawal balance. Re-mints all queued shares and
     /// restores accounting. Only the original `onBehalf` may cancel.
-    /// @dev Per-user accumulation means there is no granular cancel — all pending requests collapse together.
     function cancelWithdrawal() external returns (uint256) {
         PendingWithdrawal memory p = pendingWithdrawal[msg.sender];
         require(p.assets > 0, ErrorsLib.RequestNotPending());
+        return _cancelWithdrawal(p, p.assets);
+    }
 
-        delete pendingWithdrawal[msg.sender];
+    /// @notice Cancels a specific asset amount from the caller's pending withdrawal. Shares are
+    /// restored pro-rata to the slot's existing `assets:shares` ratio. Pass `pendingWithdrawal[you].assets`
+    /// to fully cancel — or use the no-arg overload for the same effect.
+    /// @dev Pro-rata math means `sharesRestored = assetsToCancel × pendingShares / pendingAssets`,
+    /// rounding down (vault-favoring). The remainder stays in the slot at the same ratio.
+    function cancelWithdrawal(uint256 assetsToCancel) external returns (uint256) {
+        PendingWithdrawal memory p = pendingWithdrawal[msg.sender];
+        require(p.assets > 0, ErrorsLib.RequestNotPending());
+        require(assetsToCancel > 0 && assetsToCancel <= p.assets, ErrorsLib.InvalidRequest());
+        return _cancelWithdrawal(p, assetsToCancel);
+    }
 
-        uint256 assets = p.assets;
-        uint256 shares = p.shares;
+    function _cancelWithdrawal(PendingWithdrawal memory p, uint256 assetsToCancel)
+        internal
+        returns (uint256 sharesRestored)
+    {
+        if (assetsToCancel == p.assets) {
+            // Full cancel — clear the slot for a full refund.
+            sharesRestored = p.shares;
+            delete pendingWithdrawal[msg.sender];
+        } else {
+            // Partial — pro-rata, rounded down so the remainder slot stays a safe ratio.
+            sharesRestored = (assetsToCancel * uint256(p.shares)) / uint256(p.assets);
+            pendingWithdrawal[msg.sender] = PendingWithdrawal({
+                assets: uint128(uint256(p.assets) - assetsToCancel),
+                shares: uint128(uint256(p.shares) - sharesRestored)
+            });
+        }
 
-        pendingClaimableAssets -= assets;
-        _totalAssets += uint128(assets);
-        createShares(msg.sender, shares);
+        pendingClaimableAssets -= assetsToCancel;
+        _totalAssets += uint128(assetsToCancel);
+        createShares(msg.sender, sharesRestored);
 
-        emit EventsLib.WithdrawalCancelled(msg.sender, shares, assets);
-        return shares;
+        emit EventsLib.WithdrawalCancelled(msg.sender, sharesRestored, assetsToCancel);
     }
 
     /// @notice Returns true iff `onBehalf` has a non-zero pending withdrawal and vault holds enough idle.
