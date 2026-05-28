@@ -3,10 +3,10 @@
 pragma solidity ^0.8.28;
 
 import "./BaseTest.sol";
-import {WithdrawalStatus} from "../src/interfaces/IVault.sol";
 
-/// @notice Focused coverage for the queued withdrawal path: when idle is insufficient, the user's
-/// shares are burned, an entry is recorded, and anyone may `claim` once liquidity returns.
+/// @notice Covers the Centrifuge-style per-user pending withdrawal queue: when idle is insufficient,
+/// shares are burned and the request accumulates into a single slot keyed by `onBehalf`. The slot is
+/// cleared (`delete` → gas refund) on claim/cancel.
 contract WithdrawalQueueTest is BaseTest {
     address internal immutable alice = makeAddr("alice");
     StrategyMock internal strategy;
@@ -36,27 +36,40 @@ contract WithdrawalQueueTest is BaseTest {
 
         uint256 wantAssets = 400e18;
         uint256 sharesBefore = vault.balanceOf(alice);
+        uint256 expectedShares = vault.previewWithdraw(wantAssets);
 
-        vm.expectEmit(true, true, true, false);
-        emit EventsLib.WithdrawalRequested(0, alice, alice, alice, wantAssets, 0);
+        vm.expectEmit(true, true, false, true);
+        emit EventsLib.WithdrawalRequested(alice, alice, wantAssets, expectedShares);
 
         vm.prank(alice);
         uint256 sharesBurned = vault.withdraw(wantAssets, alice, alice);
+        assertEq(sharesBurned, expectedShares, "burned matches preview");
 
-        // Shares burned, assets not yet transferred.
+        // Shares burned, no immediate transfer.
         assertEq(vault.balanceOf(alice), sharesBefore - sharesBurned, "shares burned");
         assertEq(underlyingToken.balanceOf(alice), 0, "no immediate transfer");
-        assertEq(vault.nextRequestId(), 1, "request created");
         assertEq(vault.pendingClaimableAssets(), wantAssets, "earmark recorded");
 
-        // Request stored with Pending status, correct owners.
-        (address onBehalf, , WithdrawalStatus status, address receiver, uint128 assets, uint128 reqShares) =
-            vault.withdrawalRequests(0);
-        assertEq(onBehalf, alice);
-        assertEq(receiver, alice);
-        assertEq(uint8(status), uint8(WithdrawalStatus.Pending));
-        assertEq(uint256(assets), wantAssets);
-        assertEq(uint256(reqShares), sharesBurned);
+        (uint128 pendingAssets, uint128 pendingShares) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pendingAssets), wantAssets, "pending assets");
+        assertEq(uint256(pendingShares), sharesBurned, "pending shares");
+    }
+
+    /// @notice Two sequential withdraws by the same user collapse into one slot — the second
+    /// pays only the warm-update cost (~5k gas), not a fresh ~20k cold SSTORE.
+    function testSequentialWithdrawsAccumulateIntoOneSlot() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        vm.startPrank(alice);
+        uint256 shares1 = vault.withdraw(200e18, alice, alice);
+        uint256 shares2 = vault.withdraw(300e18, alice, alice);
+        vm.stopPrank();
+
+        (uint128 pendingAssets, uint128 pendingShares) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pendingAssets), 500e18, "aggregated assets");
+        assertEq(uint256(pendingShares), shares1 + shares2, "aggregated shares");
+        assertEq(vault.pendingClaimableAssets(), 500e18, "earmark sums");
     }
 
     function testIsClaimableFlipsWithLiquidity() public {
@@ -67,16 +80,15 @@ contract WithdrawalQueueTest is BaseTest {
         vm.prank(alice);
         vault.withdraw(wantAssets, alice, alice);
 
-        assertFalse(vault.isClaimable(0), "no idle yet");
+        assertFalse(vault.isClaimable(alice), "no idle yet");
 
-        // Allocator pulls assets back from the strategy.
         vm.prank(allocator);
         vault.deallocate(address(strategy), hex"", wantAssets);
 
-        assertTrue(vault.isClaimable(0), "liquid now");
+        assertTrue(vault.isClaimable(alice), "liquid now");
     }
 
-    function testClaimSettlesPendingRequest() public {
+    function testClaimSettlesPendingAndClearsSlot() public {
         uint256 deposit = 1_000e18;
         _seed(deposit, deposit);
 
@@ -84,27 +96,27 @@ contract WithdrawalQueueTest is BaseTest {
         vm.prank(alice);
         vault.withdraw(wantAssets, alice, alice);
 
-        // Bring liquidity back.
         vm.prank(allocator);
         vault.deallocate(address(strategy), hex"", wantAssets);
 
-        // Anyone may execute the claim — assets flow to the stored receiver.
-        address randomCaller = makeAddr("anyone");
-        vm.expectEmit(true, true, false, true);
-        emit EventsLib.WithdrawalClaimed(0, alice, wantAssets);
-        vm.prank(randomCaller);
-        uint256 received = vault.claim(0);
+        // Permissionless: anyone may trigger; assets always flow to onBehalf.
+        address anyone = makeAddr("anyone");
+        vm.expectEmit(true, false, false, true);
+        emit EventsLib.WithdrawalClaimed(alice, wantAssets);
+        vm.prank(anyone);
+        uint256 received = vault.claim(alice);
 
         assertEq(received, wantAssets, "no withdrawal fee");
         assertEq(underlyingToken.balanceOf(alice), wantAssets, "alice paid out");
         assertEq(vault.pendingClaimableAssets(), 0, "earmark released");
 
-        ( , , WithdrawalStatus status, , , ) = vault.withdrawalRequests(0);
-        assertEq(uint8(status), uint8(WithdrawalStatus.Claimed));
+        // Slot cleared: subsequent reads see zero, re-claim reverts.
+        (uint128 pa, uint128 ps) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pa), 0, "slot cleared (assets)");
+        assertEq(uint256(ps), 0, "slot cleared (shares)");
 
-        // Re-claim must revert.
         vm.expectRevert(ErrorsLib.RequestNotPending.selector);
-        vault.claim(0);
+        vault.claim(alice);
     }
 
     function testClaimFailsWithoutLiquidity() public {
@@ -115,7 +127,7 @@ contract WithdrawalQueueTest is BaseTest {
         vault.withdraw(400e18, alice, alice);
 
         vm.expectRevert(ErrorsLib.InsufficientLiquidity.selector);
-        vault.claim(0);
+        vault.claim(alice);
     }
 
     function testCancelWithdrawalRestoresShares() public {
@@ -126,30 +138,47 @@ contract WithdrawalQueueTest is BaseTest {
         vm.prank(alice);
         uint256 sharesBurned = vault.withdraw(wantAssets, alice, alice);
 
-        // Only the original onBehalf may cancel.
-        vm.expectRevert(ErrorsLib.Unauthorized.selector);
-        vm.prank(makeAddr("randomCanceler"));
-        vault.cancelWithdrawal(0);
+        // Only onBehalf may cancel; an arbitrary caller has nothing to cancel.
+        address randomCanceler = makeAddr("randomCanceler");
+        vm.expectRevert(ErrorsLib.RequestNotPending.selector);
+        vm.prank(randomCanceler);
+        vault.cancelWithdrawal();
 
-        vm.expectEmit(true, true, false, true);
-        emit EventsLib.WithdrawalCancelled(0, alice, sharesBurned, wantAssets);
+        vm.expectEmit(true, false, false, true);
+        emit EventsLib.WithdrawalCancelled(alice, sharesBurned, wantAssets);
         vm.prank(alice);
-        uint256 restored = vault.cancelWithdrawal(0);
+        uint256 restored = vault.cancelWithdrawal();
 
         assertEq(restored, sharesBurned, "shares restored");
         assertEq(vault.balanceOf(alice), sharesIssued, "balance back to original");
         assertEq(vault.pendingClaimableAssets(), 0, "earmark released");
 
-        ( , , WithdrawalStatus status, , , ) = vault.withdrawalRequests(0);
-        assertEq(uint8(status), uint8(WithdrawalStatus.Cancelled));
+        (uint128 pa, ) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pa), 0, "slot cleared");
 
-        // A cancelled request cannot be claimed.
+        // A cancelled (now empty) request cannot be claimed.
         vm.expectRevert(ErrorsLib.RequestNotPending.selector);
-        vault.claim(0);
+        vault.claim(alice);
+    }
+
+    function testCancelAggregatesAllPending() public {
+        uint256 deposit = 1_000e18;
+        uint256 sharesIssued = _seed(deposit, deposit);
+
+        // Two queued withdraws accumulate into one slot; cancel restores them together.
+        vm.startPrank(alice);
+        uint256 burned1 = vault.withdraw(200e18, alice, alice);
+        uint256 burned2 = vault.withdraw(300e18, alice, alice);
+        uint256 restored = vault.cancelWithdrawal();
+        vm.stopPrank();
+
+        // All burned shares restored; alice's wallet is whole again.
+        assertEq(restored, burned1 + burned2, "restored == aggregate burned");
+        assertEq(vault.balanceOf(alice), sharesIssued, "alice balance back to original");
+        assertEq(vault.pendingClaimableAssets(), 0);
     }
 
     function testWithdrawalFeeAppliedAtClaimTime() public {
-        // Wire up a protocol fee recipient and a 1% withdrawal fee.
         address protocolRecipient = makeAddr("protocolRecipient");
         vm.startPrank(governance);
         vault.setProtocolFeeRecipient(protocolRecipient);
@@ -159,49 +188,65 @@ contract WithdrawalQueueTest is BaseTest {
         uint256 deposit = 1_000e18;
         _seed(deposit, deposit);
 
-        // alice asks for net 396 (with 1% fee, grossAssets = 400).
         uint256 netWanted = 396e18;
         vm.prank(alice);
         vault.withdraw(netWanted, alice, alice);
 
-        // Top up vault so claim succeeds.
         vm.prank(allocator);
         vault.deallocate(address(strategy), hex"", 400e18);
 
-        vault.claim(0);
+        vault.claim(alice);
 
-        // alice receives net, protocol recipient receives the fee.
         assertEq(underlyingToken.balanceOf(alice), netWanted, "alice net");
         assertEq(underlyingToken.balanceOf(protocolRecipient), 4e18, "1% fee routed");
     }
 
-    function testMultipleQueuedRequestsServedInOrder() public {
-        uint256 deposit = 1_000e18;
-        _seed(deposit, deposit);
+    /// @notice Documents the design choice: per-user accumulation means each user has an independent
+    /// slot. `isClaimable(user)` is purely a `balance >= my_assets` check — there is no FIFO across
+    /// users, and a later requester can claim before an earlier one as long as their own amount fits
+    /// current idle. Race ordering is determined by who calls `claim` first, not by request order.
+    function testDifferentUsersHaveIndependentSlots() public {
+        address bob = makeAddr("bob");
 
-        vm.startPrank(alice);
-        vault.withdraw(200e18, alice, alice); // id 0
-        vault.withdraw(300e18, alice, alice); // id 1
+        // alice deposits and queues.
+        _seed(500e18, 500e18);
+        vm.prank(alice);
+        vault.withdraw(200e18, alice, alice);
+
+        // bob deposits and queues.
+        underlyingToken.mint(bob, 500e18);
+        vm.startPrank(bob);
+        underlyingToken.approve(address(vault), 500e18);
+        vault.deposit(500e18, bob);
         vm.stopPrank();
 
-        assertEq(vault.nextRequestId(), 2);
-        assertEq(vault.pendingClaimableAssets(), 500e18, "earmark = sum");
-
-        // Bring 200 back; only request 0 becomes claimable.
         vm.prank(allocator);
-        vault.deallocate(address(strategy), hex"", 200e18);
-        assertTrue(vault.isClaimable(0));
-        assertFalse(vault.isClaimable(1));
+        vault.allocate(address(strategy), hex"", 500e18);
 
-        vault.claim(0);
-        assertEq(underlyingToken.balanceOf(alice), 200e18);
-        assertEq(vault.pendingClaimableAssets(), 300e18);
+        vm.prank(bob);
+        vault.withdraw(300e18, bob, bob);
 
-        // Bring the rest back and claim request 1.
+        // Two distinct slots.
+        (uint128 alicePending,) = vault.pendingWithdrawal(alice);
+        (uint128 bobPending,) = vault.pendingWithdrawal(bob);
+        assertEq(uint256(alicePending), 200e18);
+        assertEq(uint256(bobPending), 300e18);
+
+        // Bring back exactly bob's amount. With balance=300, both alice(200) and bob(300) are
+        // *technically* claimable since each check is `balance >= my_assets` independently — but only
+        // one will succeed (whoever calls first drains the idle).
         vm.prank(allocator);
         vault.deallocate(address(strategy), hex"", 300e18);
-        vault.claim(1);
-        assertEq(underlyingToken.balanceOf(alice), 500e18);
-        assertEq(vault.pendingClaimableAssets(), 0);
+
+        assertTrue(vault.isClaimable(alice), "alice claimable (200 <= 300)");
+        assertTrue(vault.isClaimable(bob), "bob claimable (300 <= 300)");
+
+        // Bob wins the race.
+        vault.claim(bob);
+        assertEq(underlyingToken.balanceOf(bob), 300e18, "bob received");
+        // Now vault.balance = 0; alice is stuck until more liquidity returns.
+        assertFalse(vault.isClaimable(alice), "alice no longer claimable");
+        (uint128 aliceAfter,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(aliceAfter), 200e18, "alice slot untouched");
     }
 }

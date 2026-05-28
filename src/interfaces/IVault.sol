@@ -14,20 +14,14 @@ struct Caps {
     uint128 relativeCap;
 }
 
-enum WithdrawalStatus {
-    Pending,
-    Claimed,
-    Cancelled
-}
-
-/// @dev Packed into 3 storage slots.
-struct WithdrawalRequest {
-    address onBehalf;     // share owner whose shares were burned (also the only one who can cancel)
-    uint64 requestTime;   // block timestamp at request creation
-    WithdrawalStatus status;
-    address receiver;     // who receives the assets on claim
-    uint128 assets;       // assets owed to receiver
-    uint128 shares;       // shares burned (re-minted to onBehalf on cancel)
+/// @dev Single storage slot per `onBehalf`. Subsequent queued withdrawals accumulate into the same
+/// slot — first request pays the cold-SSTORE cost (~20k gas), later requests pay the warm update
+/// cost (~5k gas). Cleared via `delete` on claim/cancel for full refund.
+/// @dev `assets` is the gross amount owed (pre-withdrawal-fee); the fee is re-derived at claim time
+/// from the current `withdrawalFee`. `shares` is the cumulative share count burned, restored on cancel.
+struct PendingWithdrawal {
+    uint128 assets;
+    uint128 shares;
 }
 
 interface IVault is IERC4626, IERC2612 {
@@ -52,18 +46,7 @@ interface IVault is IERC4626, IERC2612 {
     function depositFee() external view returns (uint96);
     function withdrawalFee() external view returns (uint96);
     function protocolFeeRecipient() external view returns (address);
-    function withdrawalRequests(uint256 requestId)
-        external
-        view
-        returns (
-            address onBehalf,
-            uint64 requestTime,
-            WithdrawalStatus status,
-            address receiver,
-            uint128 assets,
-            uint128 shares
-        );
-    function nextRequestId() external view returns (uint256);
+    function pendingWithdrawal(address onBehalf) external view returns (uint128 assets, uint128 shares);
     function pendingClaimableAssets() external view returns (uint256);
     function paused() external view returns (bool);
 
@@ -113,10 +96,13 @@ interface IVault is IERC4626, IERC2612 {
         view
         returns (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares);
 
-    // Withdrawal queue
-    function claim(uint256 requestId) external returns (uint256 assets);
-    function cancelWithdrawal(uint256 requestId) external returns (uint256 shares);
-    function isClaimable(uint256 requestId) external view returns (bool);
+    // Withdrawal queue (per-user accumulating slot, Centrifuge-style)
+    /// @notice Settles the entire accumulated pending withdrawal of `onBehalf`. Permissionless;
+    /// assets always flow to `onBehalf` (not to msg.sender).
+    function claim(address onBehalf) external returns (uint256 assets);
+    /// @notice Cancels the caller's accumulated pending withdrawal in full. Only `onBehalf` themself.
+    function cancelWithdrawal() external returns (uint256 shares);
+    function isClaimable(address onBehalf) external view returns (bool);
     function availableLiquidity() external view returns (uint256);
 
     // Force deallocate

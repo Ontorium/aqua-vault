@@ -70,7 +70,8 @@ contract UserFlowTest is BaseTest {
         assertEq(underlyingToken.balanceOf(alice), expectedAssets, "alice received assets");
         assertEq(vault.balanceOf(alice), shares - redeemShares, "alice's remaining shares");
         // Withdrawal queue stayed empty — immediate path was used.
-        assertEq(vault.nextRequestId(), 0, "no queue entries");
+        (uint128 pending,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pending), 0, "no queue entries");
     }
 
     /// @notice §7.3 user pulls all idle and the rest gets queued.
@@ -102,7 +103,8 @@ contract UserFlowTest is BaseTest {
         assertGt(sharesBurned2, 0);
         // alice's balance hasn't moved (still keepIdle from before).
         assertEq(underlyingToken.balanceOf(alice), keepIdle);
-        assertEq(vault.nextRequestId(), 1, "one queued request");
+        (uint128 pendingAssets,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pendingAssets), wantQueued, "one queued request aggregated");
         assertEq(vault.pendingClaimableAssets(), wantQueued, "queued amount tracked");
 
         // Shares burned in both paths.

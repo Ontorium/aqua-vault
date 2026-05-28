@@ -6,7 +6,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IVault, WithdrawalRequest, WithdrawalStatus} from "./interfaces/IVault.sol";
+import {IVault, PendingWithdrawal} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {AccessManaged} from "./AccessManaged.sol";
@@ -74,10 +74,13 @@ contract Vault is IVault, AccessManaged {
 
     /* WITHDRAWAL QUEUE STORAGE */
 
-    mapping(uint256 requestId => WithdrawalRequest) public withdrawalRequests;
-    uint256 public nextRequestId;
-    /// @dev Assets earmarked for unclaimed withdrawal requests. Subtracted from idle balance when
-    /// computing liquidity available for immediate withdrawals and from realAssets in interest accrual.
+    /// @dev Per-user accumulating queue (Centrifuge-style). All queued requests by the same
+    /// `onBehalf` collapse into one storage slot — first request pays the cold-SSTORE cost
+    /// (~20k gas), subsequent ones pay only ~5k (slot update). `delete` on claim/cancel reclaims
+    /// the slot for a gas refund.
+    mapping(address onBehalf => PendingWithdrawal) public pendingWithdrawal;
+    /// @dev Assets earmarked for unclaimed withdrawal requests across all users. Subtracted from
+    /// idle balance when computing liquidity available for immediate withdrawals.
     uint256 public pendingClaimableAssets;
 
     /* PAUSE STORAGE */
@@ -525,8 +528,9 @@ contract Vault is IVault, AccessManaged {
     }
 
     /// @dev Internal exit path. `assetsOut` total leaves the vault (split between `netAssets` to receiver and `fee`).
-    /// @dev If idle liquidity (vault balance minus pending withdrawal claims) covers `assetsOut`, transfer immediately.
-    /// Otherwise burn shares now and queue a withdrawal request for the user to claim later.
+    /// @dev If idle liquidity (vault balance minus pending withdrawal claims) covers `assetsOut`, transfer
+    /// immediately to `receiver`. Otherwise burn shares now and aggregate the request into
+    /// `pendingWithdrawal[onBehalf]` — claim will later send the gross to `onBehalf` (not `receiver`).
     function _exit(
         uint256 assetsOut,
         uint256 netAssets,
@@ -558,34 +562,31 @@ contract Vault is IVault, AccessManaged {
             SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
             emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, netAssets, shares);
         } else {
-            // Queue path: record full assetsOut so cancel can restore everything; fee will be settled at claim time.
-            uint256 requestId = nextRequestId++;
-            withdrawalRequests[requestId] = WithdrawalRequest({
-                onBehalf: onBehalf,
-                requestTime: uint64(block.timestamp),
-                status: WithdrawalStatus.Pending,
-                receiver: receiver,
-                assets: assetsOut.toUint128(),
-                shares: shares.toUint128()
-            });
+            // Queue path: aggregate into the single per-user slot. Receiver argument is dropped
+            // here — claim always sends to `onBehalf`. First request on this slot pays cold cost,
+            // subsequent requests pay only the warm update cost (~5k gas).
+            PendingWithdrawal storage p = pendingWithdrawal[onBehalf];
+            p.assets = (uint256(p.assets) + assetsOut).toUint128();
+            p.shares = (uint256(p.shares) + shares).toUint128();
             pendingClaimableAssets += assetsOut;
-            emit EventsLib.WithdrawalRequested(requestId, msg.sender, receiver, onBehalf, assetsOut, shares);
+            emit EventsLib.WithdrawalRequested(msg.sender, onBehalf, assetsOut, shares);
         }
     }
 
-    /// @dev Settles a Pending withdrawal request once enough idle liquidity is available.
-    /// @dev Callable by anyone — assets go to the receiver stored on the request; protocol fee (if any) to recipient.
-    function claim(uint256 requestId) external returns (uint256) {
-        WithdrawalRequest storage request = withdrawalRequests[requestId];
-        require(request.status == WithdrawalStatus.Pending, ErrorsLib.RequestNotPending());
+    /// @notice Settles the entire accumulated pending withdrawal of `onBehalf` once vault liquidity covers it.
+    /// @dev Permissionless. Assets always flow to `onBehalf` (not msg.sender). The withdrawal fee is
+    /// re-derived from the current `withdrawalFee` at claim time, not at request time. `delete` clears
+    /// the slot for a full gas refund (~14k gas) and prevents replay (subsequent calls see assets=0).
+    function claim(address onBehalf) external returns (uint256) {
+        PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
+        require(p.assets > 0, ErrorsLib.RequestNotPending());
 
-        uint256 assetsOut = request.assets;
+        uint256 assetsOut = p.assets;
         require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
 
-        request.status = WithdrawalStatus.Claimed;
+        delete pendingWithdrawal[onBehalf];
         pendingClaimableAssets -= assetsOut;
 
-        // Re-derive fee from current `withdrawalFee` for the queued amount.
         uint256 fee = assetsOut.mulDivUp(withdrawalFee, WAD);
         uint256 netAssets = assetsOut - fee;
         if (fee > 0) {
@@ -593,38 +594,36 @@ contract Vault is IVault, AccessManaged {
             SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
         }
 
-        address receiver = request.receiver;
-        SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
-        emit EventsLib.WithdrawalClaimed(requestId, receiver, netAssets);
+        SafeERC20Lib.safeTransfer(asset, onBehalf, netAssets);
+        emit EventsLib.WithdrawalClaimed(onBehalf, netAssets);
         return netAssets;
     }
 
-    /// @dev Cancels a Pending withdrawal request. Only callable by the `onBehalf` whose shares were burned.
-    /// Re-mints the original shares and restores accounting, undoing the request.
-    function cancelWithdrawal(uint256 requestId) external returns (uint256) {
-        WithdrawalRequest storage request = withdrawalRequests[requestId];
-        require(request.status == WithdrawalStatus.Pending, ErrorsLib.RequestNotPending());
-        require(msg.sender == request.onBehalf, ErrorsLib.Unauthorized());
+    /// @notice Cancels the caller's full pending withdrawal balance. Re-mints all queued shares and
+    /// restores accounting. Only the original `onBehalf` may cancel.
+    /// @dev Per-user accumulation means there is no granular cancel — all pending requests collapse together.
+    function cancelWithdrawal() external returns (uint256) {
+        PendingWithdrawal memory p = pendingWithdrawal[msg.sender];
+        require(p.assets > 0, ErrorsLib.RequestNotPending());
 
-        request.status = WithdrawalStatus.Cancelled;
+        delete pendingWithdrawal[msg.sender];
 
-        uint256 assets = request.assets;
-        uint256 shares = request.shares;
-        address onBehalf = request.onBehalf;
+        uint256 assets = p.assets;
+        uint256 shares = p.shares;
 
         pendingClaimableAssets -= assets;
         _totalAssets += uint128(assets);
-        createShares(onBehalf, shares);
+        createShares(msg.sender, shares);
 
-        emit EventsLib.WithdrawalCancelled(requestId, onBehalf, shares, assets);
+        emit EventsLib.WithdrawalCancelled(msg.sender, shares, assets);
         return shares;
     }
 
-    /// @notice Returns true iff a Pending request currently has enough idle liquidity to be claimed.
-    function isClaimable(uint256 requestId) external view returns (bool) {
-        WithdrawalRequest storage request = withdrawalRequests[requestId];
-        if (request.status != WithdrawalStatus.Pending) return false;
-        return IERC20(asset).balanceOf(address(this)) >= request.assets;
+    /// @notice Returns true iff `onBehalf` has a non-zero pending withdrawal and vault holds enough idle.
+    function isClaimable(address onBehalf) external view returns (bool) {
+        PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
+        if (p.assets == 0) return false;
+        return IERC20(asset).balanceOf(address(this)) >= p.assets;
     }
 
     /// @notice Aggregate liquidity immediately available for new withdrawals:
@@ -637,23 +636,34 @@ contract Vault is IVault, AccessManaged {
         return idle;
     }
 
-    /// @dev Returns shares withdrawn as penalty.
-    /// @dev When calling this function, a penalty is taken from onBehalf, in order to discourage allocation
-    /// manipulations.
-    /// @dev The penalty is taken as a withdrawal for which assets are returned to the vault. In consequence,
-    /// totalAssets is decreased normally along with totalSupply (the share price doesn't change except because of
-    /// rounding errors), but the amount of assets actually controlled by the vault is not decreased.
-    /// @dev If a user has A assets in the vault, and that the vault is already fully illiquid, the optimal amount to
-    /// force deallocate in order to exit the vault is min(liquidity_of_market, A / (1 + penalty)).
-    /// This ensures that either the market is empty or that it leaves no shares nor liquidity after exiting.
+    /// @dev Returns shares burned as penalty.
+    /// @dev Penalty is taken from `onBehalf` to discourage allocation manipulations. Shares are burned
+    /// in place and the corresponding underlying stays in the vault (already there from the deallocate),
+    /// so totalAssets decreases proportionally with totalSupply (share price ≈ unchanged) while the
+    /// actually-held asset balance is preserved.
+    /// @dev Implemented directly (not via `withdraw`) so it always settles in the immediate path, never
+    /// entering the per-user withdrawal queue.
     function forceDeallocate(address strategy, bytes memory data, uint256 assets, address onBehalf)
         external
         returns (uint256)
     {
         bytes32[] memory ids = deallocateInternal(strategy, data, assets);
+
         uint256 penaltyAssets =
             assets.mulDivUp(IStrategyManager(strategyManager).forceDeallocatePenalty(strategy), WAD);
-        uint256 penaltyShares = withdraw(penaltyAssets, address(this), onBehalf);
+        accrueInterest();
+        uint256 penaltyShares = previewWithdraw(penaltyAssets);
+
+        require(canSendShares(onBehalf), ErrorsLib.CannotSendShares());
+
+        if (msg.sender != onBehalf) {
+            uint256 _allowance = allowance[onBehalf][msg.sender];
+            if (_allowance != type(uint256).max) allowance[onBehalf][msg.sender] = _allowance - penaltyShares;
+        }
+
+        deleteShares(onBehalf, penaltyShares);
+        _totalAssets -= penaltyAssets.toUint128();
+
         emit EventsLib.ForceDeallocate(msg.sender, strategy, assets, onBehalf, ids, penaltyAssets);
         return penaltyShares;
     }
