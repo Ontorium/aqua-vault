@@ -23,7 +23,6 @@ library EventsLib {
     /// `onBehalf` address; multiple queued requests for the same user merge into one slot.
     event WithdrawalRequested(address indexed sender, address indexed onBehalf, uint256 assets, uint256 shares);
     event WithdrawalClaimed(address indexed onBehalf, uint256 assets);
-    event WithdrawalCancelled(address indexed onBehalf, uint256 shares, uint256 assets);
 
     // Vault creation events
     event Constructor(address indexed owner, address indexed asset);
