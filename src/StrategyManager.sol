@@ -116,7 +116,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         uint256 length = _strategies.length;
         infos = new StrategyInfo[](length);
 
-        for (uint256 i; i < length; ++i) {
+        for (uint256 i; i < length;) {
             address strategy = _strategies[i];
             StrategyConfig memory config = strategyConfig[strategy];
 
@@ -130,6 +130,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                 totalAssets: IStrategy(strategy).totalAssets(),
                 availableLiquidity: _availableLiquidityOf(strategy)
             });
+            unchecked { ++i; }
         }
     }
 
@@ -312,15 +313,17 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     ///      address must hold ALLOCATOR_ROLE (or SENTINEL_ROLE for the deallocate path) in RoleManager.
     function rebalance(RebalanceAction[] calldata actions) external {
         _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
-        for (uint256 i; i < actions.length; ++i) {
+        uint256 len = actions.length;
+        for (uint256 i; i < len;) {
             if (actions[i].isAllocate) {
                 IVault(vault).allocate(actions[i].strategy, actions[i].data, actions[i].assets);
             } else {
                 IVault(vault).deallocate(actions[i].strategy, actions[i].data, actions[i].assets);
             }
+            unchecked { ++i; }
         }
 
-        emit EventsLib.Rebalance(msg.sender, actions.length);
+        emit EventsLib.Rebalance(msg.sender, len);
     }
 
     /* AGGREGATE VIEWS */

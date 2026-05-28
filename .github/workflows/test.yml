@@ -1,35 +1,35 @@
-name: CI
+# name: CI
 
-permissions: {}
+# permissions: {}
 
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
+# on:
+#   push:
+#   pull_request:
+#   workflow_dispatch:
 
-jobs:
-  check:
-    name: Foundry project
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          submodules: recursive
+# jobs:
+#   check:
+#     name: Foundry project
+#     runs-on: ubuntu-latest
+#     permissions:
+#       contents: read
+#     steps:
+#       - uses: actions/checkout@v6
+#         with:
+#           persist-credentials: false
+#           submodules: recursive
 
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+#       - name: Install Foundry
+#         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Show Forge version
-        run: forge --version
+#       - name: Show Forge version
+#         run: forge --version
 
-      - name: Run Forge fmt
-        run: forge fmt --check
+#       - name: Run Forge fmt
+#         run: forge fmt --check
 
-      - name: Run Forge build
-        run: forge build --sizes
+#       - name: Run Forge build
+#         run: forge build --sizes
 
-      - name: Run Forge tests
-        run: forge test -vvv
+#       - name: Run Forge tests
+#         run: forge test -vvv

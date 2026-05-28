@@ -96,17 +96,21 @@ contract MorphoStrategy is IStrategy {
     }
 
     function totalAssets() public view returns (uint256 total) {
-        for (uint256 i; i < _marketIds.length; ++i) {
+        uint256 len = _marketIds.length;
+        for (uint256 i; i < len;) {
             total += _expectedSupplyAssets(_marketIds[i]);
+            unchecked { ++i; }
         }
     }
 
     function availableLiquidity() external view returns (uint256 liquidity) {
-        for (uint256 i; i < _marketIds.length; ++i) {
+        uint256 len = _marketIds.length;
+        for (uint256 i; i < len;) {
             bytes32 marketId = _marketIds[i];
             uint256 assetsOnMarket = _expectedSupplyAssets(marketId);
             uint256 marketLiquidity = _marketLiquidity(marketId);
             liquidity += marketLiquidity < assetsOnMarket ? marketLiquidity : assetsOnMarket;
+            unchecked { ++i; }
         }
     }
 
