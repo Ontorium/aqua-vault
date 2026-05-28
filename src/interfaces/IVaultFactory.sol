@@ -13,19 +13,15 @@ interface IVaultFactory {
         address indexed asset,
         bytes32 salt,
         address indexed newVault,
-        address newStrategyManager,
-        address newRoleManager,
-        address newTimelock
+        address newRoleManager
     );
 
     /* FUNCTIONS */
 
     function isVault(address account) external view returns (bool);
     function vault(address owner, address asset, bytes32 salt) external view returns (address);
-    function strategyManagerOf(address vault) external view returns (address);
     function roleManagerOf(address vault) external view returns (address);
-    function timelockOf(address vault) external view returns (address);
     function createVault(address owner, address asset, bytes32 salt)
         external
-        returns (address newVault, address newStrategyManager, address newRoleManager, address newTimelock);
+        returns (address newVault, address newRoleManager);
 }

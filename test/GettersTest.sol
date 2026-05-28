@@ -14,7 +14,7 @@ contract GettersTest is BaseTest {
     function testDecimalsScale(uint8 dec) public {
         dec = uint8(bound(uint256(dec), 0, 36));
         ERC20Mock token = new ERC20Mock(dec);
-        (address newVault,,,) = vaultFactory.createVault(owner, address(token), keccak256(abi.encode(dec)));
+        (address newVault,) = vaultFactory.createVault(owner, address(token), keccak256(abi.encode(dec)));
         uint256 expectedDecimals = dec >= 18 ? dec : 18;
         assertEq(Vault(newVault).decimals(), expectedDecimals);
     }
@@ -22,7 +22,7 @@ contract GettersTest is BaseTest {
     function testVirtualShares(uint8 dec) public {
         dec = uint8(bound(uint256(dec), 0, 36));
         ERC20Mock token = new ERC20Mock(dec);
-        (address newVault,,,) = vaultFactory.createVault(owner, address(token), keccak256(abi.encode(dec)));
+        (address newVault,) = vaultFactory.createVault(owner, address(token), keccak256(abi.encode(dec)));
         uint256 expectedVirtualShares = dec >= 18 ? 1 : 10 ** (18 - dec);
         assertEq(Vault(newVault).virtualShares(), expectedVirtualShares);
     }

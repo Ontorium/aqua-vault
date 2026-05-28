@@ -56,30 +56,33 @@ abstract contract BaseTest is Test {
 
         vaultFactory = new VaultFactory();
 
-        // Factory atomically deploys Vault + StrategyManager + RoleManager + Timelock and:
-        //   - grants DEFAULT_ADMIN_ROLE to `owner`
-        //   - grants GOVERNANCE_ROLE to the Timelock (only)
-        //   - revokes factory privileges
-        (address vAddr, address smAddr, address rmAddr, address tlAddr) =
-            vaultFactory.createVault(owner, address(underlyingToken), bytes32(0));
+        // The factory deploys only the Vault + its RoleManager dependency (and grants DEFAULT_ADMIN_ROLE
+        // to `owner`). StrategyManager, Timelock and all wiring are done here — mirroring what the
+        // deployer does in script/Deploy.s.sol — because the factory can no longer fit all four
+        // contracts under the EIP-170 code-size limit.
+        (address vAddr, address rmAddr) = vaultFactory.createVault(owner, address(underlyingToken), bytes32(0));
         vault = Vault(vAddr);
-        strategyManager = StrategyManager(smAddr);
         roleManager = RoleManager(rmAddr);
-        timelock = Timelock(tlAddr);
+
+        strategyManager = new StrategyManager(vAddr, address(underlyingToken), rmAddr);
+        timelock = new Timelock(rmAddr);
 
         vm.label(address(vault), "vault");
         vm.label(address(strategyManager), "strategyManager");
         vm.label(address(roleManager), "roleManager");
         vm.label(address(timelock), "timelock");
 
-        // For test ergonomics, also grant GOVERNANCE/CURATOR/SENTINEL/ALLOCATOR to dedicated EOAs so
-        // tests can call governance-gated functions directly without going through the timelock.
-        // Owner holds DEFAULT_ADMIN_ROLE and can grant GOVERNANCE; that role then admins the rest.
+        // Owner holds DEFAULT_ADMIN_ROLE. Grant GOVERNANCE to the Timelock (production wiring) and to a
+        // dedicated `governance` EOA (test ergonomics: lets tests call governance-gated functions
+        // directly without going through the timelock).
         vm.startPrank(owner);
+        roleManager.grantRole(roleManager.GOVERNANCE_ROLE(), address(timelock));
         roleManager.grantRole(roleManager.GOVERNANCE_ROLE(), governance);
         vm.stopPrank();
 
+        // GOVERNANCE wires the Vault -> StrategyManager (was the factory's job) and admins the rest.
         vm.startPrank(governance);
+        vault.setStrategyManager(address(strategyManager));
         roleManager.grantRole(roleManager.CURATOR_ROLE(), curator);
         roleManager.grantRole(roleManager.SENTINEL_ROLE(), sentinel);
         roleManager.grantRole(roleManager.ALLOCATOR_ROLE(), allocator);

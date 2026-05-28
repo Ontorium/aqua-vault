@@ -9,13 +9,12 @@ contract FactoryTest is BaseTest {
         // setUp() created the canonical vault via the factory; verify the bookkeeping.
         assertTrue(vaultFactory.isVault(address(vault)));
         assertEq(vaultFactory.vault(owner, address(underlyingToken), bytes32(0)), address(vault));
-        assertEq(vaultFactory.strategyManagerOf(address(vault)), address(strategyManager));
         assertEq(vaultFactory.roleManagerOf(address(vault)), address(roleManager));
-        assertEq(vaultFactory.timelockOf(address(vault)), address(timelock));
     }
 
     function testCreateVaultWiresGovernanceCorrectly() public view {
-        // Owner has DEFAULT_ADMIN, timelock has GOVERNANCE. Factory itself has been revoked.
+        // Owner is the sole DEFAULT_ADMIN; the factory never holds any role. Timelock GOVERNANCE and
+        // the Vault->StrategyManager link are wired by setUp() (the deployer's job post-factory).
         assertTrue(roleManager.hasRole(roleManager.DEFAULT_ADMIN_ROLE(), owner));
         assertTrue(roleManager.hasRole(roleManager.GOVERNANCE_ROLE(), address(timelock)));
         assertFalse(roleManager.hasRole(roleManager.GOVERNANCE_ROLE(), address(vaultFactory)));
@@ -34,9 +33,9 @@ contract FactoryTest is BaseTest {
         ERC20Mock token = new ERC20Mock(18);
 
         vm.expectEmit(true, true, false, false);
-        emit IVaultFactory.CreateVault(_owner, address(token), salt, address(0), address(0), address(0), address(0));
+        emit IVaultFactory.CreateVault(_owner, address(token), salt, address(0), address(0));
 
-        (address newVault,,,) = vaultFactory.createVault(_owner, address(token), salt);
+        (address newVault,) = vaultFactory.createVault(_owner, address(token), salt);
         assertTrue(vaultFactory.isVault(newVault));
         assertEq(vaultFactory.vault(_owner, address(token), salt), newVault);
     }
@@ -46,8 +45,8 @@ contract FactoryTest is BaseTest {
         bytes32 saltA = bytes32(uint256(1));
         bytes32 saltB = bytes32(uint256(2));
 
-        (address vaultA,,,) = vaultFactory.createVault(owner, address(token), saltA);
-        (address vaultB,,,) = vaultFactory.createVault(owner, address(token), saltB);
+        (address vaultA,) = vaultFactory.createVault(owner, address(token), saltA);
+        (address vaultB,) = vaultFactory.createVault(owner, address(token), saltB);
         assertTrue(vaultA != vaultB, "different salts must produce different addresses");
     }
 }
