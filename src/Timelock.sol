@@ -16,7 +16,10 @@ contract Timelock is ITimelock, AccessManaged {
     mapping(address target => mapping(bytes4 selector => bool isDisabled)) public abdicated;
     mapping(address target => mapping(bytes data => uint256 executableAt)) public executableAt;
 
-    constructor(address _roleManager) AccessManaged(_roleManager) {}
+    /// @dev The Timelock is its own role scope: its governance crew (GOVERNANCE/CURATOR/SENTINEL who
+    /// configure targets / schedule / revoke) are namespaced under the Timelock's own address. It governs
+    /// a vault by separately holding that vault's `scoped(vault, GOVERNANCE)`.
+    constructor(address _roleManager) AccessManaged(_roleManager, address(this)) {}
 
     function setIsTarget(address target, bool allowed) external onlyRole(GOVERNANCE_ROLE) {
         require(target != address(0), ErrorsLib.ZeroAddress());

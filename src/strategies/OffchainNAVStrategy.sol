@@ -53,8 +53,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         uint256 _stalePeriod,
         uint256 _minReportInterval,
         uint256 _maxChangeBps
-    ) AccessManaged(_roleManager) {
-        require(_vault != address(0), ErrorsLib.ZeroAddress());
+    ) AccessManaged(_roleManager, _vault) {
         require(_asset != address(0), ErrorsLib.ZeroAddress());
 
         vault = _vault;

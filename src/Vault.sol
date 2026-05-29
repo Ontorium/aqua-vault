@@ -137,7 +137,7 @@ contract Vault is IVault, AccessManaged {
 
     /* CONSTRUCTOR */
 
-    constructor(address _roleManager, address _asset) AccessManaged(_roleManager) {
+    constructor(address _roleManager, address _asset) AccessManaged(_roleManager, address(this)) {
         asset = _asset;
         lastUpdate = uint64(block.timestamp);
         uint256 assetDecimals = IERC20(_asset).decimals();

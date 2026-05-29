@@ -4,11 +4,18 @@ pragma solidity ^0.8.24;
 
 import {AccessControl} from "./vendor/AccessControl.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
+import {EventsLib} from "./libraries/EventsLib.sol";
 
-/// @notice Centralized role registry shared by Vault, StrategyManager, strategies, and any future
-/// modules (they delegate their role checks here via AccessManaged). 
+/// @notice Centralized, single-deployment role registry shared by every vault (and their StrategyManager,
+/// strategies, Timelock, and any future modules, which delegate role checks here via AccessManaged).
+/// @dev Roles are namespaced per scope: the role id checked is `scopedRole(scope, baseRole)` where `scope`
+/// is the vault address (or the Timelock's own address for its governance crew). One RoleManager therefore
+/// manages permissions for many vaults independently. Per-scope hierarchy is established by {registerScope}:
+///   - DEFAULT_ADMIN_ROLE (global): protocol super-admin, administers every scope's GOVERNANCE.
+///   - scoped(scope, GOVERNANCE): administers that scope's CURATOR/SENTINEL/ALLOCATOR.
 contract RoleManager is AccessControl {
-    /// @notice Top-level governance role. Holds most admin privileges across the protocol.
+    /// @notice Base role names. The effective role id is `scopedRole(scope, <BASE>)`, never the bare hash.
+    /// @notice Top-level governance role. Holds most admin privileges within a scope.
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
     /// @notice Manages risk parameters that increase exposure (caps up, registry, etc.).
     bytes32 public constant CURATOR_ROLE = keccak256("CURATOR_ROLE");
@@ -17,20 +24,56 @@ contract RoleManager is AccessControl {
     /// @notice Operational role for strategy allocation/deallocation.
     bytes32 public constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
 
+    /// @notice True once {registerScope} has wired a scope's GOVERNANCE→operational admin hierarchy.
+    mapping(address scope => bool) public isScopeRegistered;
+
     constructor(address admin) {
         require(admin != address(0), ErrorsLib.ZeroAddress());
 
-        // DEFAULT_ADMIN_ROLE is self-administered (admins manage themselves).
+        // DEFAULT_ADMIN_ROLE is self-administered (admins manage themselves) and is the global super-admin.
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-
-        // GOVERNANCE inherits from DEFAULT_ADMIN, others inherit from GOVERNANCE.
-        _setRoleAdmin(GOVERNANCE_ROLE, DEFAULT_ADMIN_ROLE);
-        _setRoleAdmin(CURATOR_ROLE, GOVERNANCE_ROLE);
-        _setRoleAdmin(SENTINEL_ROLE, GOVERNANCE_ROLE);
-        _setRoleAdmin(ALLOCATOR_ROLE, GOVERNANCE_ROLE);
     }
 
-    /// @dev Lets the DEFAULT_ADMIN reorganize role hierarchies (e.g. give SENTINEL its own admin).
+    /// @notice Vault-scoped role id: namespaces a base role under `scope` so a single RoleManager can manage
+    /// many vaults' permissions independently. Mirrors AccessManaged's `_scoped(baseRole)`.
+    function scopedRole(address scope, bytes32 baseRole) public pure returns (bytes32) {
+        return keccak256(abi.encode(scope, baseRole));
+    }
+
+    function governanceRole(address scope) external pure returns (bytes32) {
+        return scopedRole(scope, GOVERNANCE_ROLE);
+    }
+
+    function curatorRole(address scope) external pure returns (bytes32) {
+        return scopedRole(scope, CURATOR_ROLE);
+    }
+
+    function sentinelRole(address scope) external pure returns (bytes32) {
+        return scopedRole(scope, SENTINEL_ROLE);
+    }
+
+    function allocatorRole(address scope) external pure returns (bytes32) {
+        return scopedRole(scope, ALLOCATOR_ROLE);
+    }
+
+    /// @notice Establishes the per-scope role hierarchy: the scope's GOVERNANCE administers its CURATOR/
+    /// SENTINEL/ALLOCATOR, while GOVERNANCE itself stays administered by the global DEFAULT_ADMIN (its default).
+    /// @dev Deterministic and grants NO membership, so it is safe to call permissionlessly (the VaultFactory
+    /// calls it for each new vault). Idempotent — a second call for the same scope is a no-op.
+    function registerScope(address scope) external {
+        require(scope != address(0), ErrorsLib.ZeroAddress());
+        if (isScopeRegistered[scope]) return;
+        isScopeRegistered[scope] = true;
+
+        bytes32 gov = scopedRole(scope, GOVERNANCE_ROLE);
+        _setRoleAdmin(scopedRole(scope, CURATOR_ROLE), gov);
+        _setRoleAdmin(scopedRole(scope, SENTINEL_ROLE), gov);
+        _setRoleAdmin(scopedRole(scope, ALLOCATOR_ROLE), gov);
+
+        emit EventsLib.RegisterScope(scope);
+    }
+
+    /// @dev Lets the DEFAULT_ADMIN reorganize role hierarchies (e.g. give a scope's SENTINEL its own admin).
     /// Kept from the original RoleManager API; {AccessControl} only exposes the internal `_setRoleAdmin`.
     function setRoleAdmin(bytes32 role, bytes32 adminRole) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setRoleAdmin(role, adminRole);

@@ -53,38 +53,46 @@ abstract contract BaseTest is Test {
         underlyingToken = new ERC20Mock(uint8(underlyingTokenDecimals));
         vm.label(address(underlyingToken), "underlying");
 
-        vaultFactory = new VaultFactory();
+        // ONE shared RoleManager (owner = DEFAULT_ADMIN_ROLE), then the factory bound to it. The factory
+        // deploys only the Vault against that shared RoleManager and registers the vault's role scope.
+        // StrategyManager, Timelock and all wiring are done here — mirroring script/Deploy.s.sol — because
+        // the factory can no longer fit all the contracts under the EIP-170 code-size limit.
+        roleManager = new RoleManager(owner);
+        vaultFactory = new VaultFactory(address(roleManager));
 
-        // The factory deploys only the Vault + its RoleManager dependency (and grants DEFAULT_ADMIN_ROLE
-        // to `owner`). StrategyManager, Timelock and all wiring are done here — mirroring what the
-        // deployer does in script/Deploy.s.sol — because the factory can no longer fit all four
-        // contracts under the EIP-170 code-size limit.
-        (address vAddr, address rmAddr) = vaultFactory.createVault(owner, address(underlyingToken), bytes32(0));
+        (address vAddr,) = vaultFactory.createVault(owner, address(underlyingToken), bytes32(0));
         vault = Vault(vAddr);
-        roleManager = RoleManager(rmAddr);
 
-        strategyManager = new StrategyManager(vAddr, address(underlyingToken), rmAddr);
-        timelock = new Timelock(rmAddr);
+        strategyManager = new StrategyManager(vAddr, address(underlyingToken), address(roleManager));
+        timelock = new Timelock(address(roleManager));
+        // The Timelock is its own role scope; wire its GOVERNANCE->CURATOR/SENTINEL hierarchy.
+        roleManager.registerScope(address(timelock));
 
         vm.label(address(vault), "vault");
         vm.label(address(strategyManager), "strategyManager");
         vm.label(address(roleManager), "roleManager");
         vm.label(address(timelock), "timelock");
 
-        // Owner holds DEFAULT_ADMIN_ROLE. Grant GOVERNANCE to the Timelock (production wiring) and to a
-        // dedicated `governance` EOA (test ergonomics: lets tests call governance-gated functions
-        // directly without going through the timelock).
+        // Owner holds DEFAULT_ADMIN_ROLE. Grant the vault-scoped GOVERNANCE to the Timelock (production
+        // wiring) and to a dedicated `governance` EOA (test ergonomics: lets tests call governance-gated
+        // functions directly without going through the timelock). Also give `governance` the timelock's
+        // own GOVERNANCE so it can configure the timelock and admin its crew.
         vm.startPrank(owner);
-        roleManager.grantRole(roleManager.GOVERNANCE_ROLE(), address(timelock));
-        roleManager.grantRole(roleManager.GOVERNANCE_ROLE(), governance);
+        roleManager.grantRole(roleManager.governanceRole(vAddr), address(timelock));
+        roleManager.grantRole(roleManager.governanceRole(vAddr), governance);
+        roleManager.grantRole(roleManager.governanceRole(address(timelock)), governance);
         vm.stopPrank();
 
         // GOVERNANCE wires the Vault -> StrategyManager (was the factory's job) and admins the rest.
+        // Operational roles are granted in BOTH the vault scope (for vault/strategyManager gating) and the
+        // timelock scope (so `curator`/`sentinel` can drive the shared Timelock in TimelockTest).
         vm.startPrank(governance);
         vault.setStrategyManager(address(strategyManager));
-        roleManager.grantRole(roleManager.CURATOR_ROLE(), curator);
-        roleManager.grantRole(roleManager.SENTINEL_ROLE(), sentinel);
-        roleManager.grantRole(roleManager.ALLOCATOR_ROLE(), allocator);
+        roleManager.grantRole(roleManager.curatorRole(vAddr), curator);
+        roleManager.grantRole(roleManager.sentinelRole(vAddr), sentinel);
+        roleManager.grantRole(roleManager.allocatorRole(vAddr), allocator);
+        roleManager.grantRole(roleManager.curatorRole(address(timelock)), curator);
+        roleManager.grantRole(roleManager.sentinelRole(address(timelock)), sentinel);
         vm.stopPrank();
     }
 

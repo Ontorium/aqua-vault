@@ -29,6 +29,10 @@ library EventsLib {
     // Vault creation events
     event Constructor(address indexed owner, address indexed asset);
 
+    // RoleManager events (membership changes are emitted as RoleGranted/RoleRevoked by AccessControl)
+    /// @dev Emitted when a scope's GOVERNANCE→operational admin hierarchy is wired in the RoleManager.
+    event RegisterScope(address indexed scope);
+
     // Pause events
     event Paused(address indexed sender);
     event Unpaused(address indexed sender);

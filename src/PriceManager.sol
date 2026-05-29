@@ -27,8 +27,9 @@ contract PriceManager is IPriceManager, AccessManaged {
 
     Metrics public metrics;
 
-    constructor(IVault vault_, address offchainStrategy_, address _roleManager) AccessManaged(_roleManager) {
-        require(address(vault_) != address(0), ErrorsLib.ZeroAddress());
+    constructor(IVault vault_, address offchainStrategy_, address _roleManager)
+        AccessManaged(_roleManager, address(vault_))
+    {
         require(offchainStrategy_ != address(0), ErrorsLib.ZeroAddress());
         require(IOffchainNAVStrategy(offchainStrategy_).vault() == address(vault_), ErrorsLib.InvalidStrategyManager());
 

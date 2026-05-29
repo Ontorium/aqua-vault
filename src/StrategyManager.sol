@@ -47,8 +47,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         _;
     }
 
-    constructor(address _vault, address _asset, address _roleManager) AccessManaged(_roleManager) {
-        require(_vault != address(0), ErrorsLib.ZeroAddress());
+    constructor(address _vault, address _asset, address _roleManager) AccessManaged(_roleManager, _vault) {
         require(_asset != address(0), ErrorsLib.ZeroAddress());
 
         vault = _vault;

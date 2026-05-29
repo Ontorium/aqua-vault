@@ -16,8 +16,8 @@ contract FactoryTest is BaseTest {
         // Owner is the sole DEFAULT_ADMIN; the factory never holds any role. Timelock GOVERNANCE and
         // the Vault->StrategyManager link are wired by setUp() (the deployer's job post-factory).
         assertTrue(roleManager.hasRole(roleManager.DEFAULT_ADMIN_ROLE(), owner));
-        assertTrue(roleManager.hasRole(roleManager.GOVERNANCE_ROLE(), address(timelock)));
-        assertFalse(roleManager.hasRole(roleManager.GOVERNANCE_ROLE(), address(vaultFactory)));
+        assertTrue(roleManager.hasRole(roleManager.governanceRole(address(vault)), address(timelock)));
+        assertFalse(roleManager.hasRole(roleManager.governanceRole(address(vault)), address(vaultFactory)));
         assertFalse(roleManager.hasRole(roleManager.DEFAULT_ADMIN_ROLE(), address(vaultFactory)));
 
         // Vault knows its strategyManager and the strategyManager points back.
