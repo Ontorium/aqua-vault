@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Ontorium
 pragma solidity ^0.8.24;
 
-import {IRoleManager} from "./interfaces/IRoleManager.sol";
+import {IAccessControl} from "./interfaces/IAccessControl.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 
 /// @notice Abstract base for any contract that delegates permission checks to a central RoleManager.
@@ -16,11 +16,11 @@ abstract contract AccessManaged {
     bytes32 internal constant SENTINEL_ROLE = keccak256("SENTINEL_ROLE");
     bytes32 internal constant ALLOCATOR_ROLE = keccak256("ALLOCATOR_ROLE");
 
-    IRoleManager public immutable roleManager;
+    IAccessControl public immutable roleManager;
 
     constructor(address _roleManager) {
         require(_roleManager != address(0), ErrorsLib.ZeroAddress());
-        roleManager = IRoleManager(_roleManager);
+        roleManager = IAccessControl(_roleManager);
     }
 
     modifier onlyRole(bytes32 role) {

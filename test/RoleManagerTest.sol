@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "../lib/forge-std/src/Test.sol";
 import {RoleManager} from "../src/RoleManager.sol";
-import {IRoleManager} from "../src/interfaces/IRoleManager.sol";
+import {IAccessControl} from "../src/interfaces/IAccessControl.sol";
 import {ErrorsLib} from "../src/libraries/ErrorsLib.sol";
 
 contract RoleManagerTest is Test {
@@ -45,14 +45,14 @@ contract RoleManagerTest is Test {
     function testGrantRoleByRoleAdmin() public {
         // Admin grants governance.
         vm.expectEmit();
-        emit IRoleManager.RoleGranted(GOVERNANCE_ROLE, alice, admin);
+        emit IAccessControl.RoleGranted(GOVERNANCE_ROLE, alice, admin);
         vm.prank(admin);
         rm.grantRole(GOVERNANCE_ROLE, alice);
         assertTrue(rm.hasRole(GOVERNANCE_ROLE, alice));
 
         // Governance grants curator.
         vm.expectEmit();
-        emit IRoleManager.RoleGranted(CURATOR_ROLE, bob, alice);
+        emit IAccessControl.RoleGranted(CURATOR_ROLE, bob, alice);
         vm.prank(alice);
         rm.grantRole(CURATOR_ROLE, bob);
         assertTrue(rm.hasRole(CURATOR_ROLE, bob));
@@ -60,7 +60,10 @@ contract RoleManagerTest is Test {
 
     function testGrantRoleRejectsWrongAdmin(address rdm) public {
         vm.assume(rdm != admin);
-        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        // grantRole(GOVERNANCE_ROLE) requires its admin (DEFAULT_ADMIN_ROLE).
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, rdm, DEFAULT_ADMIN_ROLE)
+        );
         vm.prank(rdm);
         rm.grantRole(GOVERNANCE_ROLE, alice);
     }
@@ -70,7 +73,7 @@ contract RoleManagerTest is Test {
         rm.grantRole(GOVERNANCE_ROLE, alice);
 
         vm.expectEmit();
-        emit IRoleManager.RoleRevoked(GOVERNANCE_ROLE, alice, admin);
+        emit IAccessControl.RoleRevoked(GOVERNANCE_ROLE, alice, admin);
         rm.revokeRole(GOVERNANCE_ROLE, alice);
         vm.stopPrank();
         assertFalse(rm.hasRole(GOVERNANCE_ROLE, alice));
@@ -81,13 +84,13 @@ contract RoleManagerTest is Test {
         rm.grantRole(GOVERNANCE_ROLE, alice);
 
         // Confirmation must equal msg.sender.
-        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vm.expectRevert(IAccessControl.AccessControlBadConfirmation.selector);
         vm.prank(alice);
         rm.renounceRole(GOVERNANCE_ROLE, bob);
 
         // Self-confirmation works.
         vm.expectEmit();
-        emit IRoleManager.RoleRevoked(GOVERNANCE_ROLE, alice, alice);
+        emit IAccessControl.RoleRevoked(GOVERNANCE_ROLE, alice, alice);
         vm.prank(alice);
         rm.renounceRole(GOVERNANCE_ROLE, alice);
         assertFalse(rm.hasRole(GOVERNANCE_ROLE, alice));
@@ -108,12 +111,14 @@ contract RoleManagerTest is Test {
     function testSetRoleAdminReorgRequiresDefaultAdmin(address rdm) public {
         vm.assume(rdm != admin);
 
-        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, rdm, DEFAULT_ADMIN_ROLE)
+        );
         vm.prank(rdm);
         rm.setRoleAdmin(CURATOR_ROLE, DEFAULT_ADMIN_ROLE);
 
         vm.expectEmit();
-        emit IRoleManager.RoleAdminChanged(CURATOR_ROLE, GOVERNANCE_ROLE, DEFAULT_ADMIN_ROLE);
+        emit IAccessControl.RoleAdminChanged(CURATOR_ROLE, GOVERNANCE_ROLE, DEFAULT_ADMIN_ROLE);
         vm.prank(admin);
         rm.setRoleAdmin(CURATOR_ROLE, DEFAULT_ADMIN_ROLE);
         assertEq(rm.getRoleAdmin(CURATOR_ROLE), DEFAULT_ADMIN_ROLE);
