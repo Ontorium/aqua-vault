@@ -58,9 +58,9 @@ abstract contract BaseTest is Test {
         // StrategyManager, Timelock and all wiring are done here — mirroring script/Deploy.s.sol — because
         // the factory can no longer fit all the contracts under the EIP-170 code-size limit.
         roleManager = new RoleManager(owner);
-        vaultFactory = new VaultFactory(address(roleManager));
+        vaultFactory = new VaultFactory();
 
-        (address vAddr,) = vaultFactory.createVault(owner, address(underlyingToken), bytes32(0));
+        address vAddr = vaultFactory.createVault(address(roleManager), owner, address(underlyingToken), bytes32(0));
         vault = Vault(vAddr);
 
         strategyManager = new StrategyManager(vAddr, address(underlyingToken), address(roleManager));

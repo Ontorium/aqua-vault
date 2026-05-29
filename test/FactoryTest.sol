@@ -9,7 +9,8 @@ contract FactoryTest is BaseTest {
         // setUp() created the canonical vault via the factory; verify the bookkeeping.
         assertTrue(vaultFactory.isVault(address(vault)));
         assertEq(vaultFactory.vault(owner, address(underlyingToken), bytes32(0)), address(vault));
-        assertEq(vaultFactory.roleManagerOf(address(vault)), address(roleManager));
+        // The vault delegates to the single shared RoleManager passed into createVault.
+        assertEq(address(vault.roleManager()), address(roleManager));
     }
 
     function testCreateVaultWiresGovernanceCorrectly() public view {
@@ -35,7 +36,7 @@ contract FactoryTest is BaseTest {
         vm.expectEmit(true, true, false, false);
         emit IVaultFactory.CreateVault(_owner, address(token), salt, address(0), address(0));
 
-        (address newVault,) = vaultFactory.createVault(_owner, address(token), salt);
+        address newVault = vaultFactory.createVault(address(roleManager), _owner, address(token), salt);
         assertTrue(vaultFactory.isVault(newVault));
         assertEq(vaultFactory.vault(_owner, address(token), salt), newVault);
     }
@@ -45,8 +46,8 @@ contract FactoryTest is BaseTest {
         bytes32 saltA = bytes32(uint256(1));
         bytes32 saltB = bytes32(uint256(2));
 
-        (address vaultA,) = vaultFactory.createVault(owner, address(token), saltA);
-        (address vaultB,) = vaultFactory.createVault(owner, address(token), saltB);
+        address vaultA = vaultFactory.createVault(address(roleManager), owner, address(token), saltA);
+        address vaultB = vaultFactory.createVault(address(roleManager), owner, address(token), saltB);
         assertTrue(vaultA != vaultB, "different salts must produce different addresses");
     }
 }
