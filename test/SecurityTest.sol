@@ -112,9 +112,13 @@ contract SecurityTest is BaseTest {
         (uint128 lockedAssetsAfter,) = vault.pendingWithdrawal(victim);
         assertEq(uint256(lockedAssetsAfter), wantAssets, "still locked at original");
 
-        // Bring liquidity back and claim — victim gets exactly the locked amount.
+        // Bring liquidity back, operator fulfills, then claim — victim gets exactly the locked amount.
         vm.prank(allocator);
         vault.deallocate(address(strategy), hex"", wantAssets);
+        address[] memory toFulfill = new address[](1);
+        toFulfill[0] = victim;
+        vm.prank(allocator);
+        vault.fulfillWithdrawal(toFulfill);
         uint256 received = vault.claim(victim);
         assertEq(received, wantAssets, "received the locked amount");
     }

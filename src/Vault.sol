@@ -79,8 +79,16 @@ contract Vault is IVault, AccessManaged {
     /// (~20k gas), subsequent ones pay only ~5k (slot update). `delete` on claim/cancel reclaims
     /// the slot for a gas refund.
     mapping(address onBehalf => PendingWithdrawal) public pendingWithdrawal;
-    /// @dev Assets earmarked for unclaimed withdrawal requests across all users. Subtracted from
-    /// idle balance when computing liquidity available for immediate withdrawals.
+    /// @dev Operator-fulfilled, per-user claim right (ERC-7540 / Centrifuge `maxWithdraw` style). Only the
+    /// ALLOCATOR can move a request from `pendingWithdrawal` into here via {fulfillWithdrawal}; once here the
+    /// liquidity is reserved for `onBehalf` and cannot be taken by anyone else.
+    mapping(address onBehalf => uint128) public claimableAssets;
+    /// @dev Sum of `claimableAssets` across all users — the locked pool backing fulfilled claims. Invariant:
+    /// `asset.balanceOf(vault) >= reservedAssets` (maintained by {fulfillWithdrawal} and the allocate guard).
+    uint256 public reservedAssets;
+    /// @dev Total assets owed to exiting users = Σ pending request assets + `reservedAssets`. Subtracted from
+    /// idle balance when computing liquidity available for immediate withdrawals; unchanged by fulfillment
+    /// (which just moves an amount from the pending sub-total into `reservedAssets`).
     uint256 public pendingClaimableAssets;
 
     /* PAUSE STORAGE */
@@ -288,6 +296,9 @@ contract Vault is IVault, AccessManaged {
         require(_strategyManager != address(0), ErrorsLib.ZeroAddress());
 
         accrueInterest();
+
+        // Cannot push liquidity reserved for fulfilled withdrawals into a strategy.
+        require(assets <= IERC20(asset).balanceOf(address(this)) - reservedAssets, ErrorsLib.InsufficientLiquidity());
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).allocate(data, assets, msg.sig, msg.sender);
@@ -577,18 +588,40 @@ contract Vault is IVault, AccessManaged {
         }
     }
 
-    /// @notice Settles the entire accumulated pending withdrawal of `onBehalf` once vault liquidity covers it.
-    /// @dev Permissionless. Assets always flow to `onBehalf` (not msg.sender). The withdrawal fee is
-    /// re-derived from the current `withdrawalFee` at claim time, not at request time. `delete` clears
-    /// the slot for a full gas refund (~14k gas) and prevents replay (subsequent calls see assets=0).
-    function claim(address onBehalf) external returns (uint256) {
-        PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
-        require(p.assets > 0, ErrorsLib.RequestNotPending());
+    /// @notice Operator step (ERC-7540 / Centrifuge style): moves each user's full pending request into their
+    /// reserved `claimableAssets`, locking the backing liquidity per-user. The ALLOCATOR controls fulfillment
+    /// order by choosing which users — and in what sequence — to pass. A request is NOT claimable until fulfilled.
+    /// @dev Reverts if a user has no pending request, or if unreserved idle (`balance - reservedAssets`) does not
+    /// cover their pending amount. Shares were already burned at request time, so only assets move here.
+    function fulfillWithdrawal(address[] calldata onBehalfs) external onlyRole(ALLOCATOR_ROLE) {
+        uint256 len = onBehalfs.length;
+        for (uint256 i; i < len;) {
+            address onBehalf = onBehalfs[i];
+            uint256 amt = pendingWithdrawal[onBehalf].assets;
+            require(amt > 0, ErrorsLib.RequestNotPending());
+            require(
+                IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity()
+            );
 
-        uint256 assetsOut = p.assets;
+            reservedAssets += amt;
+            claimableAssets[onBehalf] += uint128(amt);
+            delete pendingWithdrawal[onBehalf];
+            emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
+            unchecked { ++i; }
+        }
+    }
+
+    /// @notice Settles a fulfilled (reserved) withdrawal of `onBehalf`. Permissionless — anyone may trigger,
+    /// assets always flow to `onBehalf` (not msg.sender). Payout is bounded by the operator-reserved
+    /// `claimableAssets[onBehalf]`, never the shared balance, so a fulfilled request cannot be jumped.
+    /// @dev The withdrawal fee is re-derived from the current `withdrawalFee` at claim time, not at request time.
+    function claim(address onBehalf) external returns (uint256) {
+        uint256 assetsOut = claimableAssets[onBehalf];
+        require(assetsOut > 0, ErrorsLib.RequestNotPending());
         require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
 
-        delete pendingWithdrawal[onBehalf];
+        claimableAssets[onBehalf] = 0;
+        reservedAssets -= assetsOut;
         pendingClaimableAssets -= assetsOut;
 
         uint256 fee = assetsOut.mulDivUp(withdrawalFee, WAD);
@@ -603,11 +636,9 @@ contract Vault is IVault, AccessManaged {
         return netAssets;
     }
 
-    /// @notice Returns true iff `onBehalf` has a non-zero pending withdrawal and vault holds enough idle.
+    /// @notice Returns true iff `onBehalf` has an operator-fulfilled (reserved) amount ready to claim.
     function isClaimable(address onBehalf) external view returns (bool) {
-        PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
-        if (p.assets == 0) return false;
-        return IERC20(asset).balanceOf(address(this)) >= p.assets;
+        return claimableAssets[onBehalf] > 0;
     }
 
     /// @notice Aggregate liquidity immediately available for new withdrawals:

@@ -8,7 +8,6 @@ import {StdStorage, stdStorage} from "../lib/forge-std/src/StdStorage.sol";
 
 import {IVault} from "../src/interfaces/IVault.sol";
 import {IVaultFactory} from "../src/interfaces/IVaultFactory.sol";
-import {IRoleManager} from "../src/interfaces/IRoleManager.sol";
 import {IStrategyManager} from "../src/interfaces/IStrategyManager.sol";
 import {ITimelock} from "../src/interfaces/ITimelock.sol";
 import {IERC20} from "../src/interfaces/IERC20.sol";

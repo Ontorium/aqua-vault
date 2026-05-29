@@ -28,7 +28,7 @@ interface IVault is IERC4626, IERC2612 {
     // State variables
     function virtualShares() external view returns (uint256);
     // @dev All role-based permissions live in the central RoleManager (queryable directly on Vault via
-    // `Vault(address).roleManager()` which returns the IRoleManager handle).
+    // `Vault(address).roleManager()` which returns the IAccessControl handle).
     function receiveSharesGate() external view returns (address);
     function sendSharesGate() external view returns (address);
     function receiveAssetsGate() external view returns (address);
@@ -47,6 +47,8 @@ interface IVault is IERC4626, IERC2612 {
     function withdrawalFee() external view returns (uint96);
     function protocolFeeRecipient() external view returns (address);
     function pendingWithdrawal(address onBehalf) external view returns (uint128 assets, uint128 shares);
+    function claimableAssets(address onBehalf) external view returns (uint128);
+    function reservedAssets() external view returns (uint256);
     function pendingClaimableAssets() external view returns (uint256);
     function paused() external view returns (bool);
 
@@ -87,6 +89,9 @@ interface IVault is IERC4626, IERC2612 {
     // Allocator functions
     function allocate(address strategy, bytes memory data, uint256 assets) external;
     function deallocate(address strategy, bytes memory data, uint256 assets) external;
+    /// @notice Operator (ALLOCATOR_ROLE) moves each user's full pending request into their reserved
+    /// `claimableAssets`, locking liquidity per-user. Caller controls fulfillment order via the list.
+    function fulfillWithdrawal(address[] calldata onBehalfs) external;
 
     // Exchange rate
     function accrueInterest() external;
@@ -96,9 +101,9 @@ interface IVault is IERC4626, IERC2612 {
         view
         returns (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares);
 
-    // Withdrawal queue (per-user accumulating slot, Centrifuge-style)
-    /// @notice Settles the entire accumulated pending withdrawal of `onBehalf`. Permissionless;
-    /// assets always flow to `onBehalf` (not to msg.sender).
+    // Withdrawal queue (per-user, operator-fulfilled, ERC-7540 / Centrifuge style)
+    /// @notice Settles `onBehalf`'s fulfilled (reserved) withdrawal. Permissionless; assets always flow to
+    /// `onBehalf` (not to msg.sender). Only claimable after the operator calls {fulfillWithdrawal}.
     function claim(address onBehalf) external returns (uint256 assets);
     function isClaimable(address onBehalf) external view returns (bool);
     function availableLiquidity() external view returns (uint256);
