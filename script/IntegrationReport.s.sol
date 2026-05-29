@@ -73,11 +73,12 @@ contract IntegrationReport is EnvSigner {
         // Signer comes from PRIVATE_KEY or MNEMONIC (see EnvSigner); also sets `user`.
         user = _startBroadcastFromEnv();
 
-        // 0. Self-grant operational roles. `user` must hold DEFAULT_ADMIN_ROLE (the deploy `owner`).
+        // 0. Self-grant operational roles for THIS vault's scope. `user` must hold DEFAULT_ADMIN_ROLE
+        // (the deploy `owner`). GOVERNANCE is admined by DEFAULT_ADMIN; once held it admins ALLOCATOR/SENTINEL.
         Snap memory a = _snap();
-        rm.grantRole(rm.GOVERNANCE_ROLE(), user);
-        rm.grantRole(rm.ALLOCATOR_ROLE(), user);
-        rm.grantRole(rm.SENTINEL_ROLE(), user);
+        rm.grantRole(rm.getScopedRole(address(vault), "GOVERNANCE_ROLE"), user);
+        rm.grantRole(rm.getScopedRole(address(vault), "ALLOCATOR_ROLE"), user);
+        rm.grantRole(rm.getScopedRole(address(vault), "SENTINEL_ROLE"), user);
         _step(
             "Grant operational roles",
             "Deployer (DEFAULT_ADMIN_ROLE) self-grants GOVERNANCE, ALLOCATOR and SENTINEL so a single EOA can drive the full flow without the Timelock.",

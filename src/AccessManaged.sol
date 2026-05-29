@@ -24,7 +24,7 @@ abstract contract AccessManaged {
     IAccessControl public immutable roleManager;
 
     /// @dev The scope (vault address) that core role checks are namespaced under. Binds this contract's
-    /// permissions to one vault inside the shared RoleManager. Must match RoleManager.scopedRole(...).
+    /// permissions to one vault inside the shared RoleManager. Must match RoleManager.getScopedRole(...).
     address public immutable roleScope;
 
     constructor(address _roleManager, address _roleScope) {

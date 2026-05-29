@@ -78,9 +78,9 @@ abstract contract BaseTest is Test {
         // functions directly without going through the timelock). Also give `governance` the timelock's
         // own GOVERNANCE so it can configure the timelock and admin its crew.
         vm.startPrank(owner);
-        roleManager.grantRole(roleManager.governanceRole(vAddr), address(timelock));
-        roleManager.grantRole(roleManager.governanceRole(vAddr), governance);
-        roleManager.grantRole(roleManager.governanceRole(address(timelock)), governance);
+        roleManager.grantRole(roleManager.getScopedRole(vAddr, "GOVERNANCE_ROLE"), address(timelock));
+        roleManager.grantRole(roleManager.getScopedRole(vAddr, "GOVERNANCE_ROLE"), governance);
+        roleManager.grantRole(roleManager.getScopedRole(address(timelock), "GOVERNANCE_ROLE"), governance);
         vm.stopPrank();
 
         // GOVERNANCE wires the Vault -> StrategyManager (was the factory's job) and admins the rest.
@@ -88,11 +88,11 @@ abstract contract BaseTest is Test {
         // timelock scope (so `curator`/`sentinel` can drive the shared Timelock in TimelockTest).
         vm.startPrank(governance);
         vault.setStrategyManager(address(strategyManager));
-        roleManager.grantRole(roleManager.curatorRole(vAddr), curator);
-        roleManager.grantRole(roleManager.sentinelRole(vAddr), sentinel);
-        roleManager.grantRole(roleManager.allocatorRole(vAddr), allocator);
-        roleManager.grantRole(roleManager.curatorRole(address(timelock)), curator);
-        roleManager.grantRole(roleManager.sentinelRole(address(timelock)), sentinel);
+        roleManager.grantRole(roleManager.getScopedRole(vAddr, "CURATOR_ROLE"), curator);
+        roleManager.grantRole(roleManager.getScopedRole(vAddr, "SENTINEL_ROLE"), sentinel);
+        roleManager.grantRole(roleManager.getScopedRole(vAddr, "ALLOCATOR_ROLE"), allocator);
+        roleManager.grantRole(roleManager.getScopedRole(address(timelock), "CURATOR_ROLE"), curator);
+        roleManager.grantRole(roleManager.getScopedRole(address(timelock), "SENTINEL_ROLE"), sentinel);
         vm.stopPrank();
     }
 

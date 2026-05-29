@@ -8,13 +8,13 @@ import {EventsLib} from "./libraries/EventsLib.sol";
 
 /// @notice Centralized, single-deployment role registry shared by every vault (and their StrategyManager,
 /// strategies, Timelock, and any future modules, which delegate role checks here via AccessManaged).
-/// @dev Roles are namespaced per scope: the role id checked is `scopedRole(scope, baseRole)` where `scope`
+/// @dev Roles are namespaced per scope: the role id checked is `getScopedRole(scope, roleName)` where `scope`
 /// is the vault address (or the Timelock's own address for its governance crew). One RoleManager therefore
 /// manages permissions for many vaults independently. Per-scope hierarchy is established by {registerScope}:
 ///   - DEFAULT_ADMIN_ROLE (global): protocol super-admin, administers every scope's GOVERNANCE.
 ///   - scoped(scope, GOVERNANCE): administers that scope's CURATOR/SENTINEL/ALLOCATOR.
 contract RoleManager is AccessControl {
-    /// @notice Base role names. The effective role id is `scopedRole(scope, <BASE>)`, never the bare hash.
+    /// @notice Base role names. The effective role id is `getScopedRole(scope, <NAME>)`, never the bare hash.
     /// @notice Top-level governance role. Holds most admin privileges within a scope.
     bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
     /// @notice Manages risk parameters that increase exposure (caps up, registry, etc.).
@@ -34,26 +34,17 @@ contract RoleManager is AccessControl {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
-    /// @notice Vault-scoped role id: namespaces a base role under `scope` so a single RoleManager can manage
-    /// many vaults' permissions independently. Mirrors AccessManaged's `_scoped(baseRole)`.
-    function scopedRole(address scope, bytes32 baseRole) public pure returns (bytes32) {
+    /// @notice Vault-scoped role id from a human-readable role NAME. A single function covers every role —
+    /// the four core ones AND any module-specific role (e.g. "OFFCHAIN_REPORTER", "NAV_UPDATER") or any
+    /// added later — with no per-role helper. Produces the exact id AccessManaged checks at runtime:
+    /// `keccak256(abi.encode(scope, keccak256(bytes(roleName))))`.
+    function getScopedRole(address scope, string calldata roleName) external pure returns (bytes32) {
+        return _scoped(scope, keccak256(bytes(roleName)));
+    }
+
+    /// @dev Namespaces an already-hashed base role under `scope`. Mirrors AccessManaged's `_scoped`.
+    function _scoped(address scope, bytes32 baseRole) internal pure returns (bytes32) {
         return keccak256(abi.encode(scope, baseRole));
-    }
-
-    function governanceRole(address scope) external pure returns (bytes32) {
-        return scopedRole(scope, GOVERNANCE_ROLE);
-    }
-
-    function curatorRole(address scope) external pure returns (bytes32) {
-        return scopedRole(scope, CURATOR_ROLE);
-    }
-
-    function sentinelRole(address scope) external pure returns (bytes32) {
-        return scopedRole(scope, SENTINEL_ROLE);
-    }
-
-    function allocatorRole(address scope) external pure returns (bytes32) {
-        return scopedRole(scope, ALLOCATOR_ROLE);
     }
 
     /// @notice Establishes the per-scope role hierarchy: the scope's GOVERNANCE administers its CURATOR/
@@ -65,10 +56,10 @@ contract RoleManager is AccessControl {
         if (isScopeRegistered[scope]) return;
         isScopeRegistered[scope] = true;
 
-        bytes32 gov = scopedRole(scope, GOVERNANCE_ROLE);
-        _setRoleAdmin(scopedRole(scope, CURATOR_ROLE), gov);
-        _setRoleAdmin(scopedRole(scope, SENTINEL_ROLE), gov);
-        _setRoleAdmin(scopedRole(scope, ALLOCATOR_ROLE), gov);
+        bytes32 gov = _scoped(scope, GOVERNANCE_ROLE);
+        _setRoleAdmin(_scoped(scope, CURATOR_ROLE), gov);
+        _setRoleAdmin(_scoped(scope, SENTINEL_ROLE), gov);
+        _setRoleAdmin(_scoped(scope, ALLOCATOR_ROLE), gov);
 
         emit EventsLib.RegisterScope(scope);
     }

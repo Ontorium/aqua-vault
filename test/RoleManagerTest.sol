@@ -30,10 +30,10 @@ contract RoleManagerTest is Test {
         DEFAULT_ADMIN_ROLE = rm.DEFAULT_ADMIN_ROLE();
 
         rm.registerScope(scope);
-        sGov = rm.governanceRole(scope);
-        sCur = rm.curatorRole(scope);
-        sSen = rm.sentinelRole(scope);
-        sAlloc = rm.allocatorRole(scope);
+        sGov = rm.getScopedRole(scope, "GOVERNANCE_ROLE");
+        sCur = rm.getScopedRole(scope, "CURATOR_ROLE");
+        sSen = rm.getScopedRole(scope, "SENTINEL_ROLE");
+        sAlloc = rm.getScopedRole(scope, "ALLOCATOR_ROLE");
     }
 
     function testConstructorRejectsZeroAdmin() public {
@@ -42,8 +42,10 @@ contract RoleManagerTest is Test {
     }
 
     function testScopedRoleMatchesConvention() public view {
+        // The scoped id derives from the role NAME hashed the same way AccessManaged checks it.
+        assertEq(sGov, keccak256(abi.encode(scope, keccak256("GOVERNANCE_ROLE"))));
         assertEq(sGov, keccak256(abi.encode(scope, rm.GOVERNANCE_ROLE())));
-        assertEq(rm.scopedRole(scope, rm.CURATOR_ROLE()), sCur);
+        assertEq(rm.getScopedRole(scope, "CURATOR_ROLE"), sCur);
     }
 
     function testAdminBootstrap() public view {
@@ -63,7 +65,7 @@ contract RoleManagerTest is Test {
         vm.prank(rdm);
         rm.registerScope(freshScope);
         assertTrue(rm.isScopeRegistered(freshScope));
-        assertEq(rm.getRoleAdmin(rm.curatorRole(freshScope)), rm.governanceRole(freshScope));
+        assertEq(rm.getRoleAdmin(rm.getScopedRole(freshScope, "CURATOR_ROLE")), rm.getScopedRole(freshScope, "GOVERNANCE_ROLE"));
 
         // Second call is a no-op: no event re-emitted.
         vm.recordLogs();
@@ -110,7 +112,7 @@ contract RoleManagerTest is Test {
         vm.prank(admin);
         rm.grantRole(sGov, alice);
         assertTrue(rm.hasRole(sGov, alice));
-        assertFalse(rm.hasRole(rm.governanceRole(other), alice), "scopes must be independent");
+        assertFalse(rm.hasRole(rm.getScopedRole(other, "GOVERNANCE_ROLE"), alice), "scopes must be independent");
     }
 
     function testRevokeRole() public {

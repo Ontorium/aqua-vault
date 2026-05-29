@@ -10,11 +10,11 @@ import "./BaseTest.sol";
 contract SettersTest is BaseTest {
     function testConstructorRoles() public view {
         assertTrue(roleManager.hasRole(roleManager.DEFAULT_ADMIN_ROLE(), owner));
-        assertTrue(roleManager.hasRole(roleManager.governanceRole(address(vault)), governance));
-        assertTrue(roleManager.hasRole(roleManager.governanceRole(address(vault)), address(timelock)));
-        assertTrue(roleManager.hasRole(roleManager.curatorRole(address(vault)), curator));
-        assertTrue(roleManager.hasRole(roleManager.sentinelRole(address(vault)), sentinel));
-        assertTrue(roleManager.hasRole(roleManager.allocatorRole(address(vault)), allocator));
+        assertTrue(roleManager.hasRole(roleManager.getScopedRole(address(vault), "GOVERNANCE_ROLE"), governance));
+        assertTrue(roleManager.hasRole(roleManager.getScopedRole(address(vault), "GOVERNANCE_ROLE"), address(timelock)));
+        assertTrue(roleManager.hasRole(roleManager.getScopedRole(address(vault), "CURATOR_ROLE"), curator));
+        assertTrue(roleManager.hasRole(roleManager.getScopedRole(address(vault), "SENTINEL_ROLE"), sentinel));
+        assertTrue(roleManager.hasRole(roleManager.getScopedRole(address(vault), "ALLOCATOR_ROLE"), allocator));
     }
 
     /* NAME / SYMBOL */
