@@ -24,12 +24,18 @@ contract AquaStrategyTest is BaseTest {
 
         // Strategy's vault is the real BaseTest vault, so we can drive both unit (prank) and
         // integration (vault.allocate) paths against one instance.
-        strategy =
-            new AquaStrategy(address(vault), address(underlyingToken), address(pool), address(aToken));
+        strategy = new AquaStrategy(
+            address(vault), address(underlyingToken), address(pool), address(aToken), address(roleManager)
+        );
     }
 
-    function _expectedId() internal view returns (bytes32) {
-        return keccak256(abi.encode(address(strategy), address(aToken)));
+    /// @dev ids[0] = adapterId (per-instance), ids[1] = per-aToken grouping. Matches AquaStrategy._ids().
+    function _expectedAdapterId() internal view returns (bytes32) {
+        return keccak256(abi.encode("AquaStrategy", address(strategy)));
+    }
+
+    function _expectedATokenId() internal view returns (bytes32) {
+        return keccak256(abi.encode("aToken", address(aToken)));
     }
 
     /// @dev Funds the strategy directly (mimicking the Vault transferring assets before allocate).
@@ -51,17 +57,21 @@ contract AquaStrategyTest is BaseTest {
     }
 
     function testConstructorRejectsZeroAddresses() public {
+        // AccessManaged constructor rejects roleScope (_vault) == 0 before any other check.
         vm.expectRevert(ErrorsLib.ZeroAddress.selector);
-        new AquaStrategy(address(0), address(underlyingToken), address(pool), address(aToken));
+        new AquaStrategy(address(0), address(underlyingToken), address(pool), address(aToken), address(roleManager));
 
         vm.expectRevert(ErrorsLib.ZeroAddress.selector);
-        new AquaStrategy(address(vault), address(0), address(pool), address(aToken));
+        new AquaStrategy(address(vault), address(0), address(pool), address(aToken), address(roleManager));
 
         vm.expectRevert(ErrorsLib.ZeroAddress.selector);
-        new AquaStrategy(address(vault), address(underlyingToken), address(0), address(aToken));
+        new AquaStrategy(address(vault), address(underlyingToken), address(0), address(aToken), address(roleManager));
 
         vm.expectRevert(ErrorsLib.ZeroAddress.selector);
-        new AquaStrategy(address(vault), address(underlyingToken), address(pool), address(0));
+        new AquaStrategy(address(vault), address(underlyingToken), address(pool), address(0), address(roleManager));
+
+        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
+        new AquaStrategy(address(vault), address(underlyingToken), address(pool), address(aToken), address(0));
     }
 
     /* ── ALLOCATE → aToken RECEIPT ────────────────────────────────────────────── */
@@ -79,9 +89,10 @@ contract AquaStrategyTest is BaseTest {
         // totalAssets mirrors the aToken balance.
         assertEq(strategy.totalAssets(), amount, "totalAssets == aToken balance");
 
-        // Return values: single id keyed by (strategy, aToken), change = +amount.
-        assertEq(ids.length, 1);
-        assertEq(ids[0], _expectedId(), "id");
+        // Return values: 2-level ids (adapter / aToken), change = +amount.
+        assertEq(ids.length, 2);
+        assertEq(ids[0], _expectedAdapterId(), "id[0] = adapter");
+        assertEq(ids[1], _expectedATokenId(), "id[1] = aToken group");
         assertEq(change, int256(amount), "change");
     }
 
@@ -90,7 +101,9 @@ contract AquaStrategyTest is BaseTest {
         (bytes32[] memory ids, int256 change) = strategy.allocate(hex"", 0, bytes4(0), address(0));
 
         assertEq(aToken.balanceOf(address(strategy)), 0, "no aTokens");
-        assertEq(ids[0], _expectedId());
+        assertEq(ids.length, 2);
+        assertEq(ids[0], _expectedAdapterId());
+        assertEq(ids[1], _expectedATokenId());
         assertEq(change, 0);
     }
 
@@ -132,7 +145,9 @@ contract AquaStrategyTest is BaseTest {
         assertEq(aToken.balanceOf(address(strategy)), amount - withdrawAmt, "aToken burned");
         // Underlying flows back to the strategy (vault then pulls it via safeTransferFrom).
         assertEq(underlyingToken.balanceOf(address(strategy)), withdrawAmt, "underlying returned");
-        assertEq(ids[0], _expectedId());
+        assertEq(ids.length, 2);
+        assertEq(ids[0], _expectedAdapterId());
+        assertEq(ids[1], _expectedATokenId());
         assertEq(change, -int256(withdrawAmt), "change negative");
     }
 
@@ -181,12 +196,15 @@ contract AquaStrategyTest is BaseTest {
 
     /// forge-config: default.isolate = true
     function testVaultAllocateRoutesToAaveAndReceivesATokens() public {
-        // Register the strategy and lift the cap for its specific id.
-        bytes memory idData = abi.encode(address(strategy), address(aToken));
+        // Register the strategy and lift the cap for BOTH ids it emits (adapter + aToken group).
+        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
         vm.startPrank(governance);
         strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0, 0);
-        strategyManager.increaseAbsoluteCap(idData, type(uint128).max);
-        strategyManager.increaseRelativeCap(idData, WAD);
+        strategyManager.increaseAbsoluteCap(adapterIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(adapterIdData, WAD);
+        strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(aTokenIdData, WAD);
         vm.stopPrank();
 
         // A user deposits, then the allocator routes the principal into Aave.
@@ -204,7 +222,8 @@ contract AquaStrategyTest is BaseTest {
         // aTokens received by the strategy; StrategyManager sees the assets.
         assertEq(aToken.balanceOf(address(strategy)), deposit, "strategy holds aTokens");
         assertEq(strategyManager.totalStrategyAssets(), deposit, "SM aggregates aToken value");
-        assertEq(strategyManager.allocation(_expectedId()), deposit, "cap allocation tracked");
+        assertEq(strategyManager.allocation(_expectedAdapterId()), deposit, "adapter cap allocation tracked");
+        assertEq(strategyManager.allocation(_expectedATokenId()), deposit, "aToken cap allocation tracked");
 
         // Interest accrues in Aave; the vault's totalAssets picks it up (within maxRate).
         vm.prank(governance);
