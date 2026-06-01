@@ -60,7 +60,7 @@ contract WithdrawalQueueTest is BaseTest {
         assertEq(vault.pendingClaimableAssets(), wantAssets, "obligation recorded");
         assertFalse(vault.isClaimable(alice), "not claimable before fulfill");
 
-        (uint128 pendingAssets, uint128 pendingShares) = vault.pendingWithdrawal(alice);
+        (uint128 pendingAssets, uint128 pendingShares,) = vault.pendingWithdrawal(alice);
         assertEq(uint256(pendingAssets), wantAssets, "pending assets");
         assertEq(uint256(pendingShares), sharesBurned, "pending shares");
     }
@@ -75,7 +75,7 @@ contract WithdrawalQueueTest is BaseTest {
         uint256 shares2 = vault.withdraw(300e18, alice, alice);
         vm.stopPrank();
 
-        (uint128 pendingAssets, uint128 pendingShares) = vault.pendingWithdrawal(alice);
+        (uint128 pendingAssets, uint128 pendingShares,) = vault.pendingWithdrawal(alice);
         assertEq(uint256(pendingAssets), 500e18, "aggregated assets");
         assertEq(uint256(pendingShares), shares1 + shares2, "aggregated shares");
         assertEq(vault.pendingClaimableAssets(), 500e18, "obligation sums");
@@ -104,7 +104,7 @@ contract WithdrawalQueueTest is BaseTest {
         assertTrue(vault.isClaimable(alice), "claimable after fulfill");
         assertEq(uint256(vault.claimableAssets(alice)), wantAssets, "reserved for alice");
         assertEq(vault.reservedAssets(), wantAssets, "reserved pool");
-        (uint128 pa,) = vault.pendingWithdrawal(alice);
+        (uint128 pa,,) = vault.pendingWithdrawal(alice);
         assertEq(uint256(pa), 0, "pending moved into reserved by fulfill");
     }
 
@@ -190,6 +190,81 @@ contract WithdrawalQueueTest is BaseTest {
 
         assertEq(underlyingToken.balanceOf(alice), netWanted, "alice net");
         assertEq(underlyingToken.balanceOf(protocolRecipient), 4e18, "1% fee routed");
+    }
+
+    /// @notice Fee is snapshotted at queue entry: a governance fee change AFTER the user queues must not
+    /// affect their claim payout. Protects queued users from fee policy shifts during their wait.
+    function testWithdrawalFeeSnapshottedAtRequest() public {
+        address protocolRecipient = makeAddr("protocolRecipient");
+        vm.startPrank(governance);
+        vault.setProtocolFeeRecipient(protocolRecipient);
+        vault.setWithdrawalFee(0.01e18); // 1% at request time
+        vm.stopPrank();
+
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        // Alice queues at 1%.
+        uint256 netWanted = 396e18;
+        vm.prank(alice);
+        vault.withdraw(netWanted, alice, alice);
+
+        // Governance jacks fee to 5% AFTER alice is in the queue.
+        vm.prank(governance);
+        vault.setWithdrawalFee(0.05e18);
+
+        // Fulfill and claim — alice must still pay the 1% she queued at, not 5%.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 400e18);
+        _fulfill(alice);
+        vault.claim(alice);
+
+        assertEq(underlyingToken.balanceOf(alice), netWanted, "alice received locked-fee net");
+        assertEq(underlyingToken.balanceOf(protocolRecipient), 4e18, "1% fee at request, not 5%");
+    }
+
+    /// @notice Two queued requests at different fee rates merge with a weighted average. Verifies that the
+    /// snapshotted fee tracks across accumulating submissions, not just the first.
+    function testQueuedFeeIsWeightedAverageAcrossSubmissions() public {
+        address protocolRecipient = makeAddr("protocolRecipient");
+        vm.startPrank(governance);
+        vault.setProtocolFeeRecipient(protocolRecipient);
+        vault.setWithdrawalFee(0); // start at 0 — first submission locks 0
+        vm.stopPrank();
+
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        // First request at 0% fee for 200 underlying.
+        vm.prank(alice);
+        vault.withdraw(200e18, alice, alice);
+
+        // Governance raises to 2%.
+        vm.prank(governance);
+        vault.setWithdrawalFee(0.02e18);
+
+        // Second request at 2% for 200 more (net asked).
+        // gross = ceil(200 / 0.98) ≈ 204.0816...e18 → +4.0816e18 fee weight
+        vm.prank(alice);
+        vault.withdraw(200e18, alice, alice);
+
+        // Locked fee should be the asset-weighted average of 0% and 2%, NOT 0 nor 2%.
+        (uint128 pendingAssets,, uint64 lockedFee) = vault.pendingWithdrawal(alice);
+        assertGt(uint256(lockedFee), 0, "locked fee should reflect the 2% submission");
+        assertLt(uint256(lockedFee), 0.02e18, "locked fee should be below the latest 2%");
+        // sanity: assets accumulated
+        assertGt(uint256(pendingAssets), 400e18, "gross accumulated (>= 400 because of 2% gross-up)");
+
+        // Bring liquidity back and fulfill+claim. Locked fee carries through to claimableFee.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", uint256(pendingAssets));
+        _fulfill(alice);
+        assertEq(uint256(vault.claimableFee(alice)), uint256(lockedFee), "claimableFee mirrors locked");
+        vault.claim(alice);
+
+        // Protocol should have received the fee implied by the locked rate, not the current rate.
+        uint256 expectedFee = (uint256(pendingAssets) * uint256(lockedFee) + 1e18 - 1) / 1e18; // mulDivUp
+        assertEq(underlyingToken.balanceOf(protocolRecipient), expectedFee, "fee = stored_gross * lockedFee");
     }
 
     /// @notice The operator controls fulfillment order and reserved funds cannot be jumped: once alice is

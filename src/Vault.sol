@@ -83,6 +83,11 @@ contract Vault is IVault, AccessManaged {
     /// ALLOCATOR can move a request from `pendingWithdrawal` into here via {fulfillWithdrawal}; once here the
     /// liquidity is reserved for `onBehalf` and cannot be taken by anyone else.
     mapping(address onBehalf => uint128) public claimableAssets;
+    /// @dev Locked withdrawalFee (WAD-scaled) snapshot moved here from `pendingWithdrawal.feeAtRequest`
+    /// at fulfillment time, so {claim} uses the fee policy in effect when the request was queued — NOT the
+    /// `withdrawalFee` at claim time. If a user has unclaimed assets and a new fulfillment merges in, the
+    /// stored fee is a weighted average by assets so each batch contributes its own fee fairly.
+    mapping(address onBehalf => uint64) public claimableFee;
     /// @dev Sum of `claimableAssets` across all users — the locked pool backing fulfilled claims. Invariant:
     /// `asset.balanceOf(vault) >= reservedAssets` (maintained by {fulfillWithdrawal} and the allocate guard).
     uint256 public reservedAssets;
@@ -580,8 +585,23 @@ contract Vault is IVault, AccessManaged {
             // Queue path: aggregate into the single per-user slot. Receiver argument is dropped
             // here — claim always sends to `onBehalf`. First request on this slot pays cold cost,
             // subsequent requests pay only the warm update cost (~5k gas).
+            //
+            // Fee snapshot policy: lock `feeAtRequest` to the current `withdrawalFee` on the first
+            // request, and weighted-average it on subsequent requests so each batch contributes its
+            // own fee fairly. This insulates the user from `setWithdrawalFee` changes that happen
+            // AFTER they queued, while keeping a single accumulating slot.
             PendingWithdrawal storage p = pendingWithdrawal[onBehalf];
-            p.assets = (uint256(p.assets) + assetsOut).toUint128();
+            uint256 oldAssets = p.assets;
+            uint64 newFee = uint64(withdrawalFee);
+            if (oldAssets == 0) {
+                p.feeAtRequest = newFee;
+            } else if (newFee != p.feeAtRequest) {
+                // weighted by assets: (oldAssets*oldFee + assetsOut*newFee) / (oldAssets + assetsOut)
+                p.feeAtRequest = uint64(
+                    (oldAssets * uint256(p.feeAtRequest) + assetsOut * uint256(newFee)) / (oldAssets + assetsOut)
+                );
+            }
+            p.assets = (oldAssets + assetsOut).toUint128();
             p.shares = (uint256(p.shares) + shares).toUint128();
             pendingClaimableAssets += assetsOut;
             emit EventsLib.WithdrawalRequested(msg.sender, onBehalf, assetsOut, shares);
@@ -597,14 +617,27 @@ contract Vault is IVault, AccessManaged {
         uint256 len = onBehalfs.length;
         for (uint256 i; i < len;) {
             address onBehalf = onBehalfs[i];
-            uint256 amt = pendingWithdrawal[onBehalf].assets;
+            PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
+            uint256 amt = p.assets;
             require(amt > 0, ErrorsLib.RequestNotPending());
             require(
                 IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity()
             );
 
             reservedAssets += amt;
-            claimableAssets[onBehalf] += uint128(amt);
+
+            // Move the locked fee snapshot from pending into claimable. If the user already had
+            // unclaimed assets at a different locked fee, weighted-average by assets so each batch
+            // keeps its own fee contribution.
+            uint256 oldClaim = claimableAssets[onBehalf];
+            uint64 oldFee = claimableFee[onBehalf];
+            if (oldClaim == 0) {
+                claimableFee[onBehalf] = p.feeAtRequest;
+            } else if (oldFee != p.feeAtRequest) {
+                claimableFee[onBehalf] =
+                    uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
+            }
+            claimableAssets[onBehalf] = uint128(oldClaim + amt);
             delete pendingWithdrawal[onBehalf];
             emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
             unchecked { ++i; }
@@ -620,11 +653,15 @@ contract Vault is IVault, AccessManaged {
         require(assetsOut > 0, ErrorsLib.RequestNotPending());
         require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
 
+        // Use the fee snapshotted at request/fulfillment time, not the current `withdrawalFee`.
+        // Protects queued users from fee policy changes that happen between request and claim.
+        uint256 lockedFee = claimableFee[onBehalf];
         claimableAssets[onBehalf] = 0;
+        delete claimableFee[onBehalf];
         reservedAssets -= assetsOut;
         pendingClaimableAssets -= assetsOut;
 
-        uint256 fee = assetsOut.mulDivUp(withdrawalFee, WAD);
+        uint256 fee = assetsOut.mulDivUp(lockedFee, WAD);
         uint256 netAssets = assetsOut - fee;
         if (fee > 0) {
             require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());

@@ -14,14 +14,17 @@ struct Caps {
     uint128 relativeCap;
 }
 
-/// @dev Single storage slot per `onBehalf`. Subsequent queued withdrawals accumulate into the same
-/// slot — first request pays the cold-SSTORE cost (~20k gas), later requests pay the warm update
-/// cost (~5k gas). Cleared via `delete` on claim/cancel for full refund.
-/// @dev `assets` is the gross amount owed (pre-withdrawal-fee); the fee is re-derived at claim time
-/// from the current `withdrawalFee`. `shares` is the cumulative share count burned, restored on cancel.
+/// @dev Single storage slot per `onBehalf` (`uint128 + uint128 = 256 bits` packed). Subsequent queued
+/// withdrawals accumulate into the same slot; a second `feeAtRequest` slot is added only when fees are
+/// active. Cleared via `delete` on claim/cancel for full refund.
+/// @dev `assets` is the gross amount owed (pre-withdrawal-fee); `feeAtRequest` snapshots the
+/// `withdrawalFee` (WAD-scaled) at the moment the request entered the queue so fee policy changes
+/// between request and claim do NOT affect the queued user. `shares` is the cumulative share count
+/// burned, restored on cancel.
 struct PendingWithdrawal {
     uint128 assets;
     uint128 shares;
+    uint64 feeAtRequest;
 }
 
 interface IVault is IERC4626, IERC2612 {
@@ -46,8 +49,12 @@ interface IVault is IERC4626, IERC2612 {
     function depositFee() external view returns (uint96);
     function withdrawalFee() external view returns (uint96);
     function protocolFeeRecipient() external view returns (address);
-    function pendingWithdrawal(address onBehalf) external view returns (uint128 assets, uint128 shares);
+    function pendingWithdrawal(address onBehalf)
+        external
+        view
+        returns (uint128 assets, uint128 shares, uint64 feeAtRequest);
     function claimableAssets(address onBehalf) external view returns (uint128);
+    function claimableFee(address onBehalf) external view returns (uint64);
     function reservedAssets() external view returns (uint256);
     function pendingClaimableAssets() external view returns (uint256);
     function paused() external view returns (bool);

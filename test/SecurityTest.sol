@@ -98,7 +98,7 @@ contract SecurityTest is BaseTest {
         vm.prank(victim);
         vault.withdraw(wantAssets, victim, victim);
 
-        (uint128 lockedAssets,) = vault.pendingWithdrawal(victim);
+        (uint128 lockedAssets,,) = vault.pendingWithdrawal(victim);
         assertEq(uint256(lockedAssets), wantAssets, "assets locked at request");
 
         // Massive interest accrues — share price doubles.
@@ -109,7 +109,7 @@ contract SecurityTest is BaseTest {
         vault.accrueInterest();
 
         // The queued request still owes exactly wantAssets — gains do NOT flow to pending requesters.
-        (uint128 lockedAssetsAfter,) = vault.pendingWithdrawal(victim);
+        (uint128 lockedAssetsAfter,,) = vault.pendingWithdrawal(victim);
         assertEq(uint256(lockedAssetsAfter), wantAssets, "still locked at original");
 
         // Bring liquidity back, operator fulfills, then claim — victim gets exactly the locked amount.
