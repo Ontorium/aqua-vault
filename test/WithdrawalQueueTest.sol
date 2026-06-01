@@ -341,4 +341,163 @@ contract WithdrawalQueueTest is BaseTest {
         vm.expectRevert(ErrorsLib.InsufficientLiquidity.selector);
         vault.allocate(address(strategy), hex"", 1);
     }
+
+    /* ── PARTIAL FULFILL ──────────────────────────────────────────────────────── */
+
+    /// @notice Partial fulfill: alice requests 1000, operator moves only 300 to claimable. The remaining
+    /// 700 stays in pendingWithdrawal with shares reduced proportionally.
+    function testPartialFulfillSplitsPendingAndClaimable() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        // alice queues 1000.
+        vm.prank(alice);
+        vault.withdraw(1_000e18, alice, alice);
+        (uint128 pendingBefore, uint128 sharesBefore,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pendingBefore), 1_000e18, "queued gross");
+
+        // Operator brings back enough liquidity for a partial fulfill of 300.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 300e18);
+
+        address[] memory users = new address[](1);
+        uint256[] memory amts = new uint256[](1);
+        users[0] = alice;
+        amts[0] = 300e18;
+
+        vm.expectEmit(true, false, false, true);
+        emit EventsLib.WithdrawalFulfilled(alice, 300e18);
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(users, amts);
+
+        // Pending shrank by 300, shares shrank proportionally (300/1000 = 30%).
+        (uint128 pendingAfter, uint128 sharesAfter,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pendingAfter), 700e18, "remaining pending");
+        // floor(sharesBefore * 700 / 1000)
+        uint256 expectedSharesAfter = uint256(sharesBefore) * 700e18 / 1_000e18;
+        assertEq(uint256(sharesAfter), expectedSharesAfter, "shares proportional");
+
+        // Claimable now reflects the 300 partial.
+        assertEq(uint256(vault.claimableAssets(alice)), 300e18, "claimable = partial");
+        assertEq(vault.reservedAssets(), 300e18, "reservation matches");
+        assertTrue(vault.isClaimable(alice));
+
+        // alice claims the partial amount; the other 700 stays queued.
+        vault.claim(alice);
+        assertEq(underlyingToken.balanceOf(alice), 300e18, "alice paid partial");
+        (uint128 stillPending,,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(stillPending), 700e18, "rest still queued");
+    }
+
+    /// @notice Partial fulfill across multiple users with different amounts in a single call.
+    function testPartialFulfillMultipleUsers() public {
+        address bob = makeAddr("bob");
+        uint256 deposit = 1_000e18;
+
+        // Both seed and queue.
+        _seed(deposit, deposit);
+        underlyingToken.mint(bob, deposit);
+        vm.startPrank(bob);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, bob);
+        vm.stopPrank();
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+
+        vm.prank(alice);
+        vault.withdraw(1_000e18, alice, alice);
+        vm.prank(bob);
+        vault.withdraw(200e18, bob, bob);
+
+        // Bring back 600 idle, operator fulfills alice 500 + bob 100.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 600e18);
+
+        address[] memory users = new address[](2);
+        uint256[] memory amts = new uint256[](2);
+        users[0] = alice; users[1] = bob;
+        amts[0] = 500e18; amts[1] = 100e18;
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(users, amts);
+
+        // Both users have partial claimable, partial pending.
+        assertEq(uint256(vault.claimableAssets(alice)), 500e18);
+        assertEq(uint256(vault.claimableAssets(bob)), 100e18);
+        (uint128 alicePending,,) = vault.pendingWithdrawal(alice);
+        (uint128 bobPending,,) = vault.pendingWithdrawal(bob);
+        assertEq(uint256(alicePending), 500e18, "alice 500 left");
+        assertEq(uint256(bobPending), 100e18, "bob 100 left");
+        assertEq(vault.reservedAssets(), 600e18, "total reserved");
+    }
+
+    /// @notice Partial fulfill that drains the user's pending to exactly 0 deletes the storage slot
+    /// (same observable state as the full-fulfill path).
+    function testPartialFulfillDrainingDeletesEntry() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        vm.prank(alice);
+        vault.withdraw(400e18, alice, alice);
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 400e18);
+
+        address[] memory users = new address[](1);
+        uint256[] memory amts = new uint256[](1);
+        users[0] = alice;
+        amts[0] = 400e18;   // full pending amount via partial path
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(users, amts);
+
+        (uint128 pendingAfter, uint128 sharesAfter,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(pendingAfter), 0, "drained");
+        assertEq(uint256(sharesAfter), 0, "shares cleared");
+    }
+
+    function testPartialFulfillRevertsOnAmountExceedingPending() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        vm.prank(alice);
+        vault.withdraw(200e18, alice, alice);
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 500e18);
+
+        address[] memory users = new address[](1);
+        uint256[] memory amts = new uint256[](1);
+        users[0] = alice;
+        amts[0] = 300e18; // > pending 200
+
+        vm.prank(allocator);
+        vm.expectRevert(ErrorsLib.InvalidRequest.selector);
+        vault.fulfillWithdrawalPartial(users, amts);
+    }
+
+    function testPartialFulfillRevertsOnLengthMismatch() public {
+        address[] memory users = new address[](2);
+        uint256[] memory amts = new uint256[](1);
+        users[0] = alice;
+        users[1] = makeAddr("bob");
+        amts[0] = 100;
+
+        vm.prank(allocator);
+        vm.expectRevert(ErrorsLib.InvalidRequest.selector);
+        vault.fulfillWithdrawalPartial(users, amts);
+    }
+
+    function testPartialFulfillRevertsOnInsufficientLiquidity() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit); // idle drained
+
+        vm.prank(alice);
+        vault.withdraw(400e18, alice, alice);
+
+        address[] memory users = new address[](1);
+        uint256[] memory amts = new uint256[](1);
+        users[0] = alice;
+        amts[0] = 100e18;
+
+        vm.prank(allocator);
+        vm.expectRevert(ErrorsLib.InsufficientLiquidity.selector);
+        vault.fulfillWithdrawalPartial(users, amts);
+    }
 }

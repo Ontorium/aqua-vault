@@ -644,6 +644,67 @@ contract Vault is IVault, AccessManaged {
         }
     }
 
+    /// @notice Partial-fulfillment variant: move a chosen `amounts[i]` of each `onBehalfs[i]`'s pending
+    /// request into their claimable balance (instead of the full pending amount). The remainder stays in
+    /// the queue for a later round. Useful when underlying liquidity arrives in batches (e.g. an RWA
+    /// custodian selling gold over multiple settlements) and the operator wants to flow it through to
+    /// requesters proportionally as it becomes available.
+    /// @dev Reverts if any `amounts[i]` exceeds that user's `pendingWithdrawal.assets`, or if the
+    /// requested total would exceed the unreserved idle balance. `pendingWithdrawal.shares` is reduced
+    /// proportionally (rounded down) so the per-user "burned shares" record stays consistent with the
+    /// remaining `assets`. The locked `feeAtRequest` on pending does NOT change (it was set at queue
+    /// time) and is propagated into `claimableFee` via the same weighted-average rule as the full
+    /// fulfill path.
+    function fulfillWithdrawalPartial(address[] calldata onBehalfs, uint256[] calldata amounts)
+        external
+        onlyRole(ALLOCATOR_ROLE)
+    {
+        require(onBehalfs.length == amounts.length, ErrorsLib.InvalidRequest());
+
+        uint256 len = onBehalfs.length;
+        for (uint256 i; i < len;) {
+            address onBehalf = onBehalfs[i];
+            uint256 amt = amounts[i];
+
+            PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
+            require(amt > 0 && amt <= p.assets, ErrorsLib.InvalidRequest());
+            require(
+                IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity()
+            );
+
+            reservedAssets += amt;
+
+            // Weighted-average fee merge (same rule as the full-fulfill path).
+            uint256 oldClaim = claimableAssets[onBehalf];
+            uint64 oldFee = claimableFee[onBehalf];
+            if (oldClaim == 0) {
+                claimableFee[onBehalf] = p.feeAtRequest;
+            } else if (oldFee != p.feeAtRequest) {
+                claimableFee[onBehalf] =
+                    uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
+            }
+            claimableAssets[onBehalf] = uint128(oldClaim + amt);
+
+            // Reduce pending. If we drained it, delete the slot to free storage; otherwise shrink
+            // assets/shares proportionally and leave feeAtRequest as-is.
+            uint256 newAssets = uint256(p.assets) - amt;
+            if (newAssets == 0) {
+                delete pendingWithdrawal[onBehalf];
+            } else {
+                // shares ↓ in the same proportion as assets ↓ (round down — favors vault by leaving
+                // marginally more shares-per-asset recorded on the user's still-pending balance).
+                uint256 newShares = (uint256(p.shares) * newAssets) / uint256(p.assets);
+                PendingWithdrawal storage ps = pendingWithdrawal[onBehalf];
+                ps.assets = newAssets.toUint128();
+                ps.shares = newShares.toUint128();
+                // ps.feeAtRequest unchanged
+            }
+
+            emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
+            unchecked { ++i; }
+        }
+    }
+
     /// @notice Settles a fulfilled (reserved) withdrawal of `onBehalf`. Permissionless — anyone may trigger,
     /// assets always flow to `onBehalf` (not msg.sender). Payout is bounded by the operator-reserved
     /// `claimableAssets[onBehalf]`, never the shared balance, so a fulfilled request cannot be jumped.
