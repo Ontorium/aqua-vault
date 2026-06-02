@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (c) 2026 Ontorium
+pragma solidity ^0.8.28;
+
+import {console} from "../../lib/forge-std/src/Script.sol";
+import {Timelock} from "../../src/Timelock.sol";
+import {Vault} from "../../src/Vault.sol";
+import {StrategyManager} from "../../src/StrategyManager.sol";
+import {EnvSigner} from "../EnvSigner.sol";
+
+/// @notice Step 8 (OPTIONAL) — set per-(target,selector) delays on the Timelock. Default is 0 (no
+/// delay), which is fine for local/test runs; before going to production you'll want non-zero values
+/// on at least the high-risk governance functions.
+///
+/// Pick the preset via `DELAY_PRESET`:
+///   - "test"   (default) — short delays for testnet/QA flow rehearsal (60s for high-risk, 0s otherwise)
+///   - "mainnet"           — conservative defaults (14d fee/recipient, 7d strategy/cap, 3d misc)
+///
+/// Args: timelock (step 02), vault (step 05), strategyManager (step 05).
+/// Required env: PRIVATE_KEY or MNEMONIC.
+/// Optional env: DELAY_PRESET (default "test").
+///
+/// Usage:
+///   export DELAY_PRESET=test
+///   forge script script/deploy/08_ConfigureTimelockDelays.s.sol \
+///     --sig "run(address,address,address)" 0xTimelock 0xVault 0xStrategyManager \
+///     --rpc-url arbitrum_sepolia --broadcast
+contract ConfigureTimelockDelays is EnvSigner {
+    function run(address timelockAddr, address vault, address sm) external {
+        Timelock timelock = Timelock(timelockAddr);
+        string memory preset = vm.envOr("DELAY_PRESET", string("test"));
+
+        _startBroadcastFromEnv();
+
+        bool isMainnet = keccak256(bytes(preset)) == keccak256(bytes("mainnet"));
+
+        // High-risk (fee / fee recipient / strategy manager link / maxRate)
+        uint256 highRisk = isMainnet ? 14 days : 60;
+        timelock.setTimelock(vault, Vault.setWithdrawalFee.selector,        highRisk);
+        timelock.setTimelock(vault, Vault.setDepositFee.selector,           highRisk);
+        timelock.setTimelock(vault, Vault.setPerformanceFee.selector,       highRisk);
+        timelock.setTimelock(vault, Vault.setManagementFee.selector,        highRisk);
+        timelock.setTimelock(vault, Vault.setProtocolFeeRecipient.selector, highRisk);
+        timelock.setTimelock(vault, Vault.setPerformanceFeeRecipient.selector, highRisk);
+        timelock.setTimelock(vault, Vault.setManagementFeeRecipient.selector,  highRisk);
+        timelock.setTimelock(vault, Vault.setStrategyManager.selector,      highRisk);
+        timelock.setTimelock(vault, Vault.setMaxRate.selector,              highRisk);
+
+        // Medium (strategy add/remove/cap)
+        uint256 mediumRisk = isMainnet ? 7 days : 60;
+        timelock.setTimelock(sm, StrategyManager.addStrategy.selector,                mediumRisk);
+        timelock.setTimelock(sm, StrategyManager.removeStrategy.selector,             mediumRisk);
+        timelock.setTimelock(sm, StrategyManager.setStrategyActive.selector,          mediumRisk);
+        timelock.setTimelock(sm, StrategyManager.increaseAbsoluteCap.selector,        mediumRisk);
+        timelock.setTimelock(sm, StrategyManager.increaseRelativeCap.selector,        mediumRisk);
+        timelock.setTimelock(sm, StrategyManager.setForceDeallocatePenalty.selector,  mediumRisk);
+
+        // Low (metadata)
+        uint256 lowRisk = isMainnet ? 3 days : 0;
+        timelock.setTimelock(vault, Vault.setName.selector,   lowRisk);
+        timelock.setTimelock(vault, Vault.setSymbol.selector, lowRisk);
+        timelock.setTimelock(vault, Vault.unpause.selector,   lowRisk);
+
+        vm.stopBroadcast();
+
+        console.log("=== Timelock delays configured ===");
+        console.log("preset       :", preset);
+        console.log("high-risk    :", highRisk, "s");
+        console.log("medium-risk  :", mediumRisk, "s");
+        console.log("low-risk     :", lowRisk, "s");
+        console.log("");
+        console.log("Add more selectors here as new governance functions are introduced.");
+    }
+}
