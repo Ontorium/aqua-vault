@@ -163,6 +163,10 @@ contract OffchainBalanceSheetTest is BaseTest {
     function testRequestReturnAndRecord(uint256 amount) public {
         amount = bound(amount, 1, type(uint96).max);
 
+        // Strict mode required for requestReturn/recordReturn.
+        vm.prank(governance);
+        strategy.setStrictMode(true);
+
         underlyingToken.mint(address(vault), amount);
         vm.prank(allocator);
         vault.allocate(address(strategy), hex"", amount);
@@ -191,6 +195,82 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.recordReturn(amount);
         assertEq(strategy.pendingReceivable(), 0);
         assertEq(strategy.deployedPrincipal(), 0);
+    }
+
+    /* ── Return-flow MODE (Simple vs Strict) ──────────────────────────────────── */
+
+    /// @notice Default Simple mode disables requestReturn/recordReturn — they revert. The custodian
+    /// send + REPORTER report is the entire reconciliation flow.
+    function testSimpleModeDisablesRequestReturn() public {
+        assertFalse(strategy.strictMode(), "default is Simple");
+
+        vm.prank(manager);
+        vm.expectRevert(OffchainNAVStrategy.StrictModeRequired.selector);
+        strategy.requestReturn(100);
+
+        vm.prank(manager);
+        vm.expectRevert(OffchainNAVStrategy.StrictModeRequired.selector);
+        strategy.recordReturn(100);
+    }
+
+    /// @notice GOV can toggle strict mode and Simple→Strict→Simple round-trip works when no in-transit
+    /// balance is outstanding.
+    function testSetStrictModeToggle() public {
+        assertFalse(strategy.strictMode());
+
+        vm.prank(governance);
+        strategy.setStrictMode(true);
+        assertTrue(strategy.strictMode());
+
+        vm.prank(governance);
+        strategy.setStrictMode(false);
+        assertFalse(strategy.strictMode());
+    }
+
+    /// @notice Strict→Simple is rejected while a return is still in-transit (`pendingReceivable > 0`).
+    /// Operator must complete `recordReturn` first to settle the in-transit balance.
+    function testStrictToSimpleBlockedWhilePendingReceivable() public {
+        uint256 amount = 100e18;
+
+        vm.prank(governance);
+        strategy.setStrictMode(true);
+
+        underlyingToken.mint(address(vault), amount);
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", amount);
+        vm.prank(manager);
+        strategy.deployToCustodian(amount);
+
+        vm.prank(reporter);
+        strategy.report(amount, amount, keccak256("r0"), "");
+
+        // Create in-transit balance.
+        vm.prank(manager);
+        strategy.requestReturn(amount);
+        assertEq(strategy.pendingReceivable(), amount);
+
+        // Cannot switch back to Simple while in-transit balance is outstanding.
+        vm.prank(governance);
+        vm.expectRevert(OffchainNAVStrategy.PendingReceivableNonZero.selector);
+        strategy.setStrictMode(false);
+
+        // After recordReturn settles it, the switch goes through.
+        vm.prank(custodian);
+        underlyingToken.transfer(address(strategy), amount);
+        vm.prank(manager);
+        strategy.recordReturn(amount);
+        assertEq(strategy.pendingReceivable(), 0);
+
+        vm.prank(governance);
+        strategy.setStrictMode(false);
+        assertFalse(strategy.strictMode());
+    }
+
+    function testSetStrictModeOnlyGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vm.prank(rdm);
+        strategy.setStrictMode(true);
     }
 
     function testReporterRoleIsRequired(address rdm) public {

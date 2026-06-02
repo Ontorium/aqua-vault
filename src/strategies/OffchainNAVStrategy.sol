@@ -25,6 +25,27 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     address public custodian;
     uint256 public maxChangeBps;
+    /// @dev Destination for non-underlying token sweeps (RWA-related reward drops, mistakenly-sent
+    /// tokens, etc.). The strategy's `asset` is protected so a skim cannot drain NAV backing.
+    address public skimRecipient;
+
+    /// @dev Return-flow accounting mode.
+    /// - `false` (Simple, default): `requestReturn`/`recordReturn` are disabled. The custodian sends
+    ///   underlying directly to this strategy and the REPORTER reflects the change in the next
+    ///   `report()` (by lowering `reportedAssets`). Fewer onchain steps, no in-transit tracking.
+    /// - `true` (Strict): `requestReturn`/`recordReturn` are enabled, producing an auditable
+    ///   "request → in-transit (`pendingReceivable`) → arrival" trail on every return. Use for
+    ///   external custodians or regulated RWA where in-transit visibility matters.
+    bool public strictMode;
+
+    error CannotSkimUnderlying();
+    error SkimRecipientUnset();
+    error StrictModeRequired();
+    error PendingReceivableNonZero();
+
+    event Skim(address indexed token, uint256 amount);
+    event SetSkimRecipient(address indexed recipient);
+    event SetStrictMode(bool strict);
 
     modifier onlyVault() {
         require(msg.sender == vault, ErrorsLib.Unauthorized());
@@ -83,6 +104,35 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     function setMinReportInterval(uint256 newMinReportInterval) external onlyRole(GOVERNANCE_ROLE) {
         _setMinReportInterval(newMinReportInterval);
+    }
+
+    function setSkimRecipient(address newSkimRecipient) external onlyRole(GOVERNANCE_ROLE) {
+        skimRecipient = newSkimRecipient;
+        emit SetSkimRecipient(newSkimRecipient);
+    }
+
+    /// @notice Toggle the return-flow accounting mode. Switching to Simple is rejected if a strict-mode
+    /// in-transit balance is still outstanding (drain `pendingReceivable` first via `recordReturn`).
+    function setStrictMode(bool _strict) external onlyRole(GOVERNANCE_ROLE) {
+        if (!_strict && _position.pendingReceivable != 0) revert PendingReceivableNonZero();
+        strictMode = _strict;
+        emit SetStrictMode(_strict);
+    }
+
+    /* SKIM */
+
+    /// @notice Sweep an arbitrary token balance to `skimRecipient`. Defensive recovery for RWA reward
+    /// drops or mistakenly-sent tokens. The strategy's `asset` is protected — it backs vault NAV via
+    /// `idle` and cannot be skimmed out.
+    function skim(address token) external {
+        address recipient = skimRecipient;
+        require(recipient != address(0), SkimRecipientUnset());
+        require(msg.sender == recipient, ErrorsLib.Unauthorized());
+        require(token != asset, CannotSkimUnderlying());
+
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        SafeERC20Lib.safeTransfer(token, recipient, balance);
+        emit Skim(token, balance);
     }
 
     /* VAULT STRATEGY INTERFACE */
@@ -171,15 +221,21 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         _recordCapitalDeployed(assets, destination);
     }
 
-    /// @notice Moves reported offchain liquidity into pending receivable.
-    /// @dev Call this when a return has been requested from the custodian but has not arrived onchain yet.
+    /// @notice [Strict mode only] Mark `assets` as in-transit: shifts the amount from
+    /// `reportedAvailableLiquidity` into `pendingReceivable`. No ERC20 movement. Reverts in Simple mode.
+    /// @dev Use when a return has been requested from the custodian but has not arrived onchain yet,
+    /// to expose in-transit balance for audit/UI. Pair with {recordReturn} on arrival.
     function requestReturn(uint256 assets) external onlyManager {
+        if (!strictMode) revert StrictModeRequired();
         _recordReturnRequested(assets);
     }
 
-    /// @notice Records assets that have already arrived back onchain.
-    /// @dev The custodian must transfer tokens to this strategy before this call.
+    /// @notice [Strict mode only] Confirm that custodian's transfer of `assets` has arrived; drains
+    /// `pendingReceivable` and `deployedPrincipal`. Reverts in Simple mode.
+    /// @dev The custodian must transfer tokens to this strategy before this call. In Simple mode,
+    /// custodian transfers are reconciled solely via the next `report()` lowering `reportedAssets`.
     function recordReturn(uint256 assets) external onlyManager {
+        if (!strictMode) revert StrictModeRequired();
         require(IERC20(asset).balanceOf(address(this)) >= assets, ErrorsLib.ReturnNotReceived());
         _recordCapitalReturned(assets);
     }
