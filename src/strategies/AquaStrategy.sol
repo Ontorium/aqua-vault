@@ -96,7 +96,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
 
     /* ALLOCATE / DEALLOCATE */
 
-    function allocate(bytes memory, uint256 assets, bytes4, address)
+    function allocate(bytes calldata, uint256 assets, bytes4, address)
         external
         onlyVault
         returns (bytes32[] memory ids, int256 change)
@@ -106,7 +106,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
         change = int256(assets);
     }
 
-    function deallocate(bytes memory, uint256 assets, bytes4, address)
+    function deallocate(bytes calldata, uint256 assets, bytes4, address)
         external
         onlyVault
         returns (bytes32[] memory ids, int256 change)

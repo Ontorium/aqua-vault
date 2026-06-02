@@ -141,12 +141,12 @@ contract Vault is IVault, AccessManaged {
 
     /* GOVERNANCE FUNCTIONS (gated by RoleManager) */
 
-    function setName(string memory newName) external onlyRole(GOVERNANCE_ROLE) {
+    function setName(string calldata newName) external onlyRole(GOVERNANCE_ROLE) {
         name = newName;
         emit EventsLib.SetName(newName);
     }
 
-    function setSymbol(string memory newSymbol) external onlyRole(GOVERNANCE_ROLE) {
+    function setSymbol(string calldata newSymbol) external onlyRole(GOVERNANCE_ROLE) {
         symbol = newSymbol;
         emit EventsLib.SetSymbol(newSymbol);
     }
@@ -273,7 +273,7 @@ contract Vault is IVault, AccessManaged {
 
     /* ALLOCATOR FUNCTIONS */
 
-    function allocate(address strategy, bytes memory data, uint256 assets)
+    function allocate(address strategy, bytes calldata data, uint256 assets)
         external
         whenNotPaused
         onlyRole(ALLOCATOR_ROLE)
@@ -281,7 +281,7 @@ contract Vault is IVault, AccessManaged {
         allocateInternal(strategy, data, assets);
     }
 
-    function allocateInternal(address strategy, bytes memory data, uint256 assets) internal {
+    function allocateInternal(address strategy, bytes calldata data, uint256 assets) internal {
         address _strategyManager = strategyManager;
         require(_strategyManager != address(0), ErrorsLib.ZeroAddress());
 
@@ -298,12 +298,12 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.Allocate(msg.sender, strategy, assets, ids, change);
     }
 
-    function deallocate(address strategy, bytes memory data, uint256 assets) external {
+    function deallocate(address strategy, bytes calldata data, uint256 assets) external {
         _requireAnyRole(ALLOCATOR_ROLE, SENTINEL_ROLE);
         deallocateInternal(strategy, data, assets);
     }
 
-    function deallocateInternal(address strategy, bytes memory data, uint256 assets)
+    function deallocateInternal(address strategy, bytes calldata data, uint256 assets)
         internal
         returns (bytes32[] memory ids)
     {
@@ -579,14 +579,19 @@ contract Vault is IVault, AccessManaged {
     /// @dev Requires enough unreserved idle liquidity for each request.
     function fulfillWithdrawal(address[] calldata onBehalfs) external onlyRole(ALLOCATOR_ROLE) {
         uint256 len = onBehalfs.length;
+        IERC20 assetToken = IERC20(asset);
+        uint256 balance = assetToken.balanceOf(address(this));
+        uint256 reserved = reservedAssets;
+        uint256 newReserved = reserved;
+
         for (uint256 i; i < len;) {
             address onBehalf = onBehalfs[i];
             PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
             uint256 amt = p.assets;
             require(amt > 0, ErrorsLib.RequestNotPending());
-            require(IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity());
+            require(balance - newReserved >= amt, ErrorsLib.InsufficientLiquidity());
 
-            reservedAssets += amt;
+            newReserved += amt;
 
             // Merge the queued fee snapshot into the claimable balance.
             uint256 oldClaim = claimableAssets[onBehalf];
@@ -604,6 +609,8 @@ contract Vault is IVault, AccessManaged {
                 ++i;
             }
         }
+
+        if (newReserved != reserved) reservedAssets = newReserved;
     }
 
     /// @notice Partially fulfills pending withdrawals.
@@ -615,15 +622,20 @@ contract Vault is IVault, AccessManaged {
         require(onBehalfs.length == amounts.length, ErrorsLib.InvalidRequest());
 
         uint256 len = onBehalfs.length;
+        IERC20 assetToken = IERC20(asset);
+        uint256 balance = assetToken.balanceOf(address(this));
+        uint256 reserved = reservedAssets;
+        uint256 newReserved = reserved;
+
         for (uint256 i; i < len;) {
             address onBehalf = onBehalfs[i];
             uint256 amt = amounts[i];
 
             PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
             require(amt > 0 && amt <= p.assets, ErrorsLib.InvalidRequest());
-            require(IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity());
+            require(balance - newReserved >= amt, ErrorsLib.InsufficientLiquidity());
 
-            reservedAssets += amt;
+            newReserved += amt;
 
             // Merge the fee snapshot into the claimable balance.
             uint256 oldClaim = claimableAssets[onBehalf];
@@ -653,6 +665,8 @@ contract Vault is IVault, AccessManaged {
                 ++i;
             }
         }
+
+        if (newReserved != reserved) reservedAssets = newReserved;
     }
 
     /// @notice Settles a fulfilled withdrawal for `onBehalf`.
@@ -697,7 +711,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Burns shares as a force-deallocation penalty.
     /// The penalty is settled immediately and never enters the withdrawal queue.
-    function forceDeallocate(address strategy, bytes memory data, uint256 assets, address onBehalf)
+    function forceDeallocate(address strategy, bytes calldata data, uint256 assets, address onBehalf)
         external
         returns (uint256)
     {

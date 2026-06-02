@@ -146,7 +146,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     }
 
     /// @dev The vault transfers assets before calling this hook.
-    function allocate(bytes memory, uint256 assets, bytes4, address)
+    function allocate(bytes calldata, uint256 assets, bytes4, address)
         external
         override
         onlyVault
@@ -160,7 +160,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     }
 
     /// @dev Only onchain assets can be returned here.
-    function deallocate(bytes memory, uint256 assets, bytes4, address)
+    function deallocate(bytes calldata, uint256 assets, bytes4, address)
         external
         override
         onlyVault

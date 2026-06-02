@@ -217,7 +217,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.SetStrategyKind(strategy, kind);
     }
 
-    function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external onlyRole(GOVERNANCE_ROLE) {
+    function increaseAbsoluteCap(bytes calldata idData, uint256 newAbsoluteCap) external onlyRole(GOVERNANCE_ROLE) {
         bytes32 id = keccak256(idData);
         require(newAbsoluteCap >= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotIncreasing());
 
@@ -225,7 +225,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.IncreaseAbsoluteCap(id, idData, newAbsoluteCap);
     }
 
-    function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external {
+    function decreaseAbsoluteCap(bytes calldata idData, uint256 newAbsoluteCap) external {
         _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
         bytes32 id = keccak256(idData);
         require(newAbsoluteCap <= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotDecreasing());
@@ -234,7 +234,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.DecreaseAbsoluteCap(msg.sender, id, idData, newAbsoluteCap);
     }
 
-    function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external onlyRole(GOVERNANCE_ROLE) {
+    function increaseRelativeCap(bytes calldata idData, uint256 newRelativeCap) external onlyRole(GOVERNANCE_ROLE) {
         bytes32 id = keccak256(idData);
         require(newRelativeCap <= WAD, ErrorsLib.RelativeCapAboveOne());
         require(newRelativeCap >= caps[id].relativeCap, ErrorsLib.RelativeCapNotIncreasing());
@@ -243,7 +243,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.IncreaseRelativeCap(id, idData, newRelativeCap);
     }
 
-    function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external {
+    function decreaseRelativeCap(bytes calldata idData, uint256 newRelativeCap) external {
         _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
         bytes32 id = keccak256(idData);
         require(newRelativeCap <= caps[id].relativeCap, ErrorsLib.RelativeCapNotDecreasing());
@@ -266,7 +266,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     /* VAULT HOOKS */
 
     /// @notice Updates cap accounting after a vault allocation.
-    function onAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps)
+    function onAllocate(address strategy, bytes32[] calldata ids, int256 change, uint256 totalAssetsForCaps)
         external
         onlyVault
     {
@@ -296,7 +296,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     /// @notice Updates cap accounting after a vault deallocation.
     /// @dev Does not enforce `active` so inactive strategies can still unwind.
-    function onDeallocate(address strategy, bytes32[] memory ids, int256 change) external onlyVault {
+    function onDeallocate(address strategy, bytes32[] calldata ids, int256 change) external onlyVault {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
 
         uint256 len = ids.length;
@@ -320,10 +320,11 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
         uint256 len = actions.length;
         for (uint256 i; i < len;) {
-            if (actions[i].isAllocate) {
-                IVault(vault).allocate(actions[i].strategy, actions[i].data, actions[i].assets);
+            RebalanceAction calldata action = actions[i];
+            if (action.isAllocate) {
+                IVault(vault).allocate(action.strategy, action.data, action.assets);
             } else {
-                IVault(vault).deallocate(actions[i].strategy, actions[i].data, actions[i].assets);
+                IVault(vault).deallocate(action.strategy, action.data, action.assets);
             }
             unchecked {
                 ++i;

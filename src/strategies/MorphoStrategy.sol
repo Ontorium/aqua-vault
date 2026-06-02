@@ -133,7 +133,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
 
     /* ALLOCATE / DEALLOCATE */
 
-    function allocate(bytes memory data, uint256 assets, bytes4, address)
+    function allocate(bytes calldata data, uint256 assets, bytes4, address)
         external
         onlyVault
         returns (bytes32[] memory, int256 change)
@@ -160,7 +160,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         return (_ids(mp), change);
     }
 
-    function deallocate(bytes memory data, uint256 assets, bytes4, address)
+    function deallocate(bytes calldata data, uint256 assets, bytes4, address)
         external
         onlyVault
         returns (bytes32[] memory, int256 change)

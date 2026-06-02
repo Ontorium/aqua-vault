@@ -69,11 +69,11 @@ interface IVault is IERC4626, IERC2612 {
     function canReceiveAssets(address account) external view returns (bool);
 
     // Multicall
-    function multicall(bytes[] memory data) external;
+    function multicall(bytes[] calldata data) external;
 
     // Governance-owned Vault admin (all gated by RoleManager.GOVERNANCE_ROLE)
-    function setName(string memory newName) external;
-    function setSymbol(string memory newSymbol) external;
+    function setName(string calldata newName) external;
+    function setSymbol(string calldata newSymbol) external;
     function setReceiveSharesGate(address newReceiveSharesGate) external;
     function setSendSharesGate(address newSendSharesGate) external;
     function setReceiveAssetsGate(address newReceiveAssetsGate) external;
@@ -94,8 +94,8 @@ interface IVault is IERC4626, IERC2612 {
     function unpause() external;
 
     // Allocator functions
-    function allocate(address strategy, bytes memory data, uint256 assets) external;
-    function deallocate(address strategy, bytes memory data, uint256 assets) external;
+    function allocate(address strategy, bytes calldata data, uint256 assets) external;
+    function deallocate(address strategy, bytes calldata data, uint256 assets) external;
     /// @notice Operator (ALLOCATOR_ROLE) moves each user's full pending request into their reserved
     /// `claimableAssets`, locking liquidity per-user. Caller controls fulfillment order via the list.
     function fulfillWithdrawal(address[] calldata onBehalfs) external;
@@ -116,7 +116,7 @@ interface IVault is IERC4626, IERC2612 {
     function availableLiquidity() external view returns (uint256);
 
     // Force deallocate
-    function forceDeallocate(address strategy, bytes memory data, uint256 assets, address onBehalf)
+    function forceDeallocate(address strategy, bytes calldata data, uint256 assets, address onBehalf)
         external
         returns (uint256 penaltyShares);
 }

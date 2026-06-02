@@ -15,8 +15,8 @@ contract StrategyMock is IStrategy {
     bytes32 public constant ID_0 = keccak256(bytes("id-0"));
     bytes32 public constant ID_1 = keccak256(bytes("id-1"));
 
-    uint256 internal _principal;     // cumulative allocate minus deallocate
-    int256 internal _delta;          // gain (>0) or loss (<0) overlay on top of principal
+    uint256 internal _principal; // cumulative allocate minus deallocate
+    int256 internal _delta; // gain (>0) or loss (<0) overlay on top of principal
     uint256 internal _reportedToCaps; // last value reported back to StrategyManager via `change`
 
     bytes4 public recordedSelector;
@@ -37,7 +37,7 @@ contract StrategyMock is IStrategy {
         _delta = -int256(amount);
     }
 
-    function allocate(bytes memory, uint256 assets, bytes4 selector, address sender)
+    function allocate(bytes calldata, uint256 assets, bytes4 selector, address sender)
         external
         returns (bytes32[] memory ids, int256 change)
     {
@@ -55,7 +55,7 @@ contract StrategyMock is IStrategy {
         ids[1] = ID_1;
     }
 
-    function deallocate(bytes memory, uint256 assets, bytes4 selector, address sender)
+    function deallocate(bytes calldata, uint256 assets, bytes4 selector, address sender)
         external
         returns (bytes32[] memory ids, int256 change)
     {

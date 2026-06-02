@@ -43,15 +43,15 @@ interface IStrategyManager {
     function setStrategyTargetBps(address strategy, uint256 targetBps) external;
     function setStrategyKind(address strategy, uint8 kind) external;
 
-    function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external;
-    function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external;
-    function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external;
-    function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external;
+    function increaseAbsoluteCap(bytes calldata idData, uint256 newAbsoluteCap) external;
+    function decreaseAbsoluteCap(bytes calldata idData, uint256 newAbsoluteCap) external;
+    function increaseRelativeCap(bytes calldata idData, uint256 newRelativeCap) external;
+    function decreaseRelativeCap(bytes calldata idData, uint256 newRelativeCap) external;
     function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external;
 
     /// @notice Vault-only cap accounting hooks invoked after each allocate/deallocate.
-    function onAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps) external;
-    function onDeallocate(address strategy, bytes32[] memory ids, int256 change) external;
+    function onAllocate(address strategy, bytes32[] calldata ids, int256 change, uint256 totalAssetsForCaps) external;
+    function onDeallocate(address strategy, bytes32[] calldata ids, int256 change) external;
 
     function strategiesLength() external view returns (uint256);
     function strategies(uint256 index) external view returns (address);
