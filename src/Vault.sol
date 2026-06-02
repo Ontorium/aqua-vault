@@ -56,8 +56,7 @@ contract Vault is IVault, AccessManaged {
 
     /* STRATEGY STORAGE */
 
-    /// @dev Strategy registry/caps/allocation live in StrategyManager.
-    /// @dev Vault keeps custody of assets and only asks StrategyManager to validate/update accounting.
+    /// @dev Strategy configuration and cap accounting live in StrategyManager.
 
     /* FEES STORAGE */
 
@@ -65,41 +64,29 @@ contract Vault is IVault, AccessManaged {
     address public performanceFeeRecipient;
     uint96 public managementFee;
     address public managementFeeRecipient;
-    /// @dev Charged on deposit/mint (WAD-scaled, e.g. 1e16 = 1%). Routed to protocolFeeRecipient.
+    /// @dev Deposit fee in WAD units.
     uint96 public depositFee;
-    /// @dev Charged on withdraw/redeem (WAD-scaled). Routed to protocolFeeRecipient.
+    /// @dev Withdrawal fee in WAD units.
     uint96 public withdrawalFee;
-    /// @dev Treasury for principal-side fees (deposit/withdrawal). Set/changed via TREASURY-style governance.
+    /// @dev Recipient for deposit and withdrawal fees.
     address public protocolFeeRecipient;
 
     /* WITHDRAWAL QUEUE STORAGE */
 
-    /// @dev Per-user accumulating queue (Centrifuge-style). All queued requests by the same
-    /// `onBehalf` collapse into one storage slot — first request pays the cold-SSTORE cost
-    /// (~20k gas), subsequent ones pay only ~5k (slot update). `delete` on claim/cancel reclaims
-    /// the slot for a gas refund.
+    /// @dev Per-user withdrawal queue entry.
     mapping(address onBehalf => PendingWithdrawal) public pendingWithdrawal;
-    /// @dev Operator-fulfilled, per-user claim right (ERC-7540 / Centrifuge `maxWithdraw` style). Only the
-    /// ALLOCATOR can move a request from `pendingWithdrawal` into here via {fulfillWithdrawal}; once here the
-    /// liquidity is reserved for `onBehalf` and cannot be taken by anyone else.
+    /// @dev Assets reserved for fulfilled withdrawals.
     mapping(address onBehalf => uint128) public claimableAssets;
-    /// @dev Locked withdrawalFee (WAD-scaled) snapshot moved here from `pendingWithdrawal.feeAtRequest`
-    /// at fulfillment time, so {claim} uses the fee policy in effect when the request was queued — NOT the
-    /// `withdrawalFee` at claim time. If a user has unclaimed assets and a new fulfillment merges in, the
-    /// stored fee is a weighted average by assets so each batch contributes its own fee fairly.
+    /// @dev Fee snapshot applied when claimable withdrawals are settled.
     mapping(address onBehalf => uint64) public claimableFee;
-    /// @dev Sum of `claimableAssets` across all users — the locked pool backing fulfilled claims. Invariant:
-    /// `asset.balanceOf(vault) >= reservedAssets` (maintained by {fulfillWithdrawal} and the allocate guard).
+    /// @dev Total assets reserved for fulfilled withdrawals.
     uint256 public reservedAssets;
-    /// @dev Total assets owed to exiting users = Σ pending request assets + `reservedAssets`. Subtracted from
-    /// idle balance when computing liquidity available for immediate withdrawals; unchanged by fulfillment
-    /// (which just moves an amount from the pending sub-total into `reservedAssets`).
+    /// @dev Total assets owed to queued or fulfilled withdrawals.
     uint256 public pendingClaimableAssets;
 
     /* PAUSE STORAGE */
 
-    /// @dev When true, new inflows and strategy allocations are blocked. Withdrawals (withdraw/redeem/
-    /// claim/forceDeallocate) remain open so users can always exit. SENTINEL pauses, GOVERNANCE unpauses.
+    /// @dev When true, deposits and allocations are paused.
     bool public paused;
 
     modifier whenNotPaused() {
@@ -109,8 +96,7 @@ contract Vault is IVault, AccessManaged {
 
     /* GETTERS */
 
-    /// @dev Strategy registry, caps, allocation, per-strategy/per-id queries and aggregate liquidity views
-    /// are intentionally NOT mirrored here — query StrategyManager (via strategyManager()) directly.
+    /// @dev Strategy views are exposed through StrategyManager.
 
     function totalAssets() external view returns (uint256) {
         (uint256 newTotalAssets,,) = accrueInterestView();
@@ -124,9 +110,7 @@ contract Vault is IVault, AccessManaged {
 
     /* MULTICALL */
 
-    /// @dev Useful for EOAs to batch admin calls.
-    /// @dev Does not return anything, because accounts who would use the return data would be contracts, which can do
-    /// the multicall themselves.
+    /// @dev Convenience helper for batching vault calls.
     function multicall(bytes[] calldata data) external {
         uint256 len = data.length;
         for (uint256 i; i < len;) {
@@ -136,7 +120,9 @@ contract Vault is IVault, AccessManaged {
                     revert(add(32, returnData), mload(returnData))
                 }
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -185,8 +171,7 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.SetSendAssetsGate(newSendAssetsGate);
     }
 
-    /// @dev One-time setup so the factory can atomically deploy and link a dedicated StrategyManager.
-    /// @dev The manager must explicitly point back to this Vault and use the same asset.
+    /// @dev One-time hook for wiring the vault's StrategyManager.
     function setStrategyManager(address newStrategyManager) external onlyRole(GOVERNANCE_ROLE) {
         require(strategyManager == address(0), ErrorsLib.InvalidStrategyManager());
         require(newStrategyManager != address(0), ErrorsLib.ZeroAddress());
@@ -238,8 +223,8 @@ contract Vault is IVault, AccessManaged {
 
     /* PAUSE CONTROLS */
 
-    /// @notice Emergency-pause new inflows and allocations. Withdrawals stay open.
-    /// @dev SENTINEL can pause for fast response; GOVERNANCE must unpause to confirm safety.
+    /// @notice Pauses deposits and allocations.
+    /// @dev Withdrawals remain available.
     function pause() external onlyRole(SENTINEL_ROLE) {
         paused = true;
         emit EventsLib.Paused(msg.sender);
@@ -302,7 +287,7 @@ contract Vault is IVault, AccessManaged {
 
         accrueInterest();
 
-        // Cannot push liquidity reserved for fulfilled withdrawals into a strategy.
+        // Do not allocate assets reserved for fulfilled withdrawals.
         require(assets <= IERC20(asset).balanceOf(address(this)) - reservedAssets, ErrorsLib.InsufficientLiquidity());
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
@@ -351,7 +336,7 @@ contract Vault is IVault, AccessManaged {
         _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
     }
 
-    /// @dev PriceManager-only NAV sync path that bypasses maxRate and immediately reflects reported offchain NAV.
+    /// @dev Syncs reported NAV without applying the max-rate cap.
     function syncReportedNAV() external {
         require(msg.sender == priceManager, ErrorsLib.Unauthorized());
 
@@ -364,11 +349,9 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.SyncReportedNAV(msg.sender, previousTotalAssets, newTotalAssets);
     }
 
-    function _applyAccruedTotalAssets(
-        uint256 newTotalAssets,
-        uint256 performanceFeeShares,
-        uint256 managementFeeShares
-    ) internal {
+    function _applyAccruedTotalAssets(uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares)
+        internal
+    {
         emit EventsLib.AccrueInterest(_totalAssets, newTotalAssets, performanceFeeShares, managementFeeShares);
         _totalAssets = newTotalAssets.toUint128();
         if (firstTotalAssets == 0) firstTotalAssets = newTotalAssets;
@@ -377,12 +360,8 @@ contract Vault is IVault, AccessManaged {
         lastUpdate = uint64(block.timestamp);
     }
 
-    /// @dev Returns newTotalAssets, performanceFeeShares, managementFeeShares.
-    /// @dev The management fee is not bound to the interest, so it can make the share price go down.
-    /// @dev The management fees is taken even if the vault incurs some losses.
-    /// @dev Both fees are rounded down, so fee recipients could receive less than expected.
-    /// @dev The performance fee is taken on the "distributed interest" (which differs from the "real interest" because
-    /// of the max rate).
+    /// @dev Returns accrued assets together with the fee shares to mint.
+    /// Management fees accrue regardless of profit and both fee paths round down.
     function accrueInterestView() public view returns (uint256, uint256, uint256) {
         if (firstTotalAssets != 0) return (_totalAssets, 0, 0);
         uint256 elapsed = block.timestamp - lastUpdate;
@@ -411,8 +390,7 @@ contract Vault is IVault, AccessManaged {
         uint256 newTotalAssetsWithoutFees = newTotalAssets - performanceFeeAssets - managementFeeAssets;
         performanceFeeShares =
             performanceFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
-        managementFeeShares =
-            managementFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
+        managementFeeShares = managementFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
     }
 
     function _realAssets() internal view returns (uint256 realAssets) {
@@ -420,7 +398,7 @@ contract Vault is IVault, AccessManaged {
         if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
     }
 
-    /// @dev Returns previewed minted shares (depositFee deducted from input assets).
+    /// @dev Returns the shares minted for `assets`, net of deposit fees.
     function previewDeposit(uint256 assets) public view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
@@ -428,7 +406,7 @@ contract Vault is IVault, AccessManaged {
         return netAssets.mulDivDown(newTotalSupply + virtualShares, newTotalAssets + 1);
     }
 
-    /// @dev Returns previewed deposited assets (caller pays gross = netAssets + depositFee).
+    /// @dev Returns the gross assets required to mint `shares`.
     function previewMint(uint256 shares) public view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
@@ -436,7 +414,7 @@ contract Vault is IVault, AccessManaged {
         return depositFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - depositFee);
     }
 
-    /// @dev Returns previewed redeemed shares (caller burns gross to receive net assets after withdrawalFee).
+    /// @dev Returns the shares burned to withdraw `assets` after fees.
     function previewWithdraw(uint256 assets) public view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
@@ -444,7 +422,7 @@ contract Vault is IVault, AccessManaged {
         return grossAssets.mulDivUp(newTotalSupply + virtualShares, newTotalAssets + 1);
     }
 
-    /// @dev Returns previewed withdrawn assets (receiver gets net after withdrawalFee).
+    /// @dev Returns the assets received when redeeming `shares`.
     function previewRedeem(uint256 shares) public view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
@@ -452,14 +430,14 @@ contract Vault is IVault, AccessManaged {
         return grossAssets - grossAssets.mulDivUp(withdrawalFee, WAD);
     }
 
-    /// @dev Returns corresponding shares (rounded down) at current price. Fee-agnostic per ERC-4626 spec.
+    /// @dev Returns the fee-agnostic share amount for `assets`.
     function convertToShares(uint256 assets) external view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
         return assets.mulDivDown(newTotalSupply + virtualShares, newTotalAssets + 1);
     }
 
-    /// @dev Returns corresponding assets (rounded down) at current price. Fee-agnostic per ERC-4626 spec.
+    /// @dev Returns the fee-agnostic asset amount for `shares`.
     function convertToAssets(uint256 shares) external view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
@@ -468,29 +446,29 @@ contract Vault is IVault, AccessManaged {
 
     /* MAX FUNCTIONS */
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxDeposit(address) external pure returns (uint256) {
         return 0;
     }
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxMint(address) external pure returns (uint256) {
         return 0;
     }
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxWithdraw(address) external pure returns (uint256) {
         return 0;
     }
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxRedeem(address) external pure returns (uint256) {
         return 0;
     }
 
     /* USER MAIN FUNCTIONS */
 
-    /// @dev Charges `depositFee` on the way in; returns shares minted for the net (post-fee) amount.
+    /// @dev Charges `depositFee` and mints shares against the net assets.
     function deposit(uint256 assets, address onBehalf) external whenNotPaused returns (uint256) {
         accrueInterest();
         uint256 shares = previewDeposit(assets);
@@ -500,7 +478,7 @@ contract Vault is IVault, AccessManaged {
         return shares;
     }
 
-    /// @dev Mints exactly `shares` to onBehalf. Caller pays grossAssets = netAssets + fee.
+    /// @dev Mints `shares` to `onBehalf` for the required gross assets.
     function mint(uint256 shares, address onBehalf) external whenNotPaused returns (uint256) {
         accrueInterest();
         uint256 grossAssets = previewMint(shares);
@@ -510,7 +488,7 @@ contract Vault is IVault, AccessManaged {
         return grossAssets;
     }
 
-    /// @dev Internal entry path. `assets` is what msg.sender pays in; `netAssets` is what backs new shares.
+    /// @dev Internal entry path for deposits and mints.
     function _enter(uint256 assets, uint256 netAssets, uint256 fee, uint256 shares, address onBehalf) internal {
         require(canReceiveShares(onBehalf), ErrorsLib.CannotReceiveShares());
         require(canSendAssets(msg.sender), ErrorsLib.CannotSendAssets());
@@ -525,32 +503,28 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.Deposit(msg.sender, onBehalf, netAssets, shares);
     }
 
-    /// @dev `assets` is what the receiver ends up with after withdrawalFee. Caller burns shares for grossAssets.
+    /// @dev Withdraws `assets` net of fees to `receiver`.
     function withdraw(uint256 assets, address receiver, address onBehalf) public returns (uint256) {
         accrueInterest();
         uint256 shares = previewWithdraw(assets);
-        uint256 grossAssets =
-            withdrawalFee == 0 ? assets : assets.mulDivUp(WAD, WAD - withdrawalFee);
+        uint256 grossAssets = withdrawalFee == 0 ? assets : assets.mulDivUp(WAD, WAD - withdrawalFee);
         uint256 fee = grossAssets - assets;
         _exit(grossAssets, assets, fee, shares, receiver, onBehalf);
         return shares;
     }
 
-    /// @dev Burns `shares` from onBehalf. Receiver gets netAssets after fee.
+    /// @dev Redeems `shares` from `onBehalf`.
     function redeem(uint256 shares, address receiver, address onBehalf) external returns (uint256) {
         accrueInterest();
         uint256 netAssets = previewRedeem(shares);
-        uint256 grossAssets =
-            withdrawalFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - withdrawalFee);
+        uint256 grossAssets = withdrawalFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - withdrawalFee);
         uint256 fee = grossAssets - netAssets;
         _exit(grossAssets, netAssets, fee, shares, receiver, onBehalf);
         return netAssets;
     }
 
-    /// @dev Internal exit path. `assetsOut` total leaves the vault (split between `netAssets` to receiver and `fee`).
-    /// @dev If idle liquidity (vault balance minus pending withdrawal claims) covers `assetsOut`, transfer
-    /// immediately to `receiver`. Otherwise burn shares now and aggregate the request into
-    /// `pendingWithdrawal[onBehalf]` — claim will later send the gross to `onBehalf` (not `receiver`).
+    /// @dev Internal exit path for withdrawals and redeems.
+    /// Uses the queue when idle liquidity is insufficient.
     function _exit(
         uint256 assetsOut,
         uint256 netAssets,
@@ -574,7 +548,7 @@ contract Vault is IVault, AccessManaged {
         uint256 effectiveIdle = idleAssets.zeroFloorSub(pendingClaimableAssets);
 
         if (effectiveIdle >= assetsOut) {
-            // Immediate path: send fee then net to receiver.
+            // Immediate settlement.
             if (fee > 0) {
                 require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
                 SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
@@ -582,21 +556,14 @@ contract Vault is IVault, AccessManaged {
             SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
             emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, netAssets, shares);
         } else {
-            // Queue path: aggregate into the single per-user slot. Receiver argument is dropped
-            // here — claim always sends to `onBehalf`. First request on this slot pays cold cost,
-            // subsequent requests pay only the warm update cost (~5k gas).
-            //
-            // Fee snapshot policy: lock `feeAtRequest` to the current `withdrawalFee` on the first
-            // request, and weighted-average it on subsequent requests so each batch contributes its
-            // own fee fairly. This insulates the user from `setWithdrawalFee` changes that happen
-            // AFTER they queued, while keeping a single accumulating slot.
+            // Queue settlement and snapshot the fee in effect for this request.
             PendingWithdrawal storage p = pendingWithdrawal[onBehalf];
             uint256 oldAssets = p.assets;
             uint64 newFee = uint64(withdrawalFee);
             if (oldAssets == 0) {
                 p.feeAtRequest = newFee;
             } else if (newFee != p.feeAtRequest) {
-                // weighted by assets: (oldAssets*oldFee + assetsOut*newFee) / (oldAssets + assetsOut)
+                // Weighted by assets.
                 p.feeAtRequest = uint64(
                     (oldAssets * uint256(p.feeAtRequest) + assetsOut * uint256(newFee)) / (oldAssets + assetsOut)
                 );
@@ -608,11 +575,8 @@ contract Vault is IVault, AccessManaged {
         }
     }
 
-    /// @notice Operator step (ERC-7540 / Centrifuge style): moves each user's full pending request into their
-    /// reserved `claimableAssets`, locking the backing liquidity per-user. The ALLOCATOR controls fulfillment
-    /// order by choosing which users — and in what sequence — to pass. A request is NOT claimable until fulfilled.
-    /// @dev Reverts if a user has no pending request, or if unreserved idle (`balance - reservedAssets`) does not
-    /// cover their pending amount. Shares were already burned at request time, so only assets move here.
+    /// @notice Moves pending withdrawals into claimable balances.
+    /// @dev Requires enough unreserved idle liquidity for each request.
     function fulfillWithdrawal(address[] calldata onBehalfs) external onlyRole(ALLOCATOR_ROLE) {
         uint256 len = onBehalfs.length;
         for (uint256 i; i < len;) {
@@ -620,15 +584,11 @@ contract Vault is IVault, AccessManaged {
             PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
             uint256 amt = p.assets;
             require(amt > 0, ErrorsLib.RequestNotPending());
-            require(
-                IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity()
-            );
+            require(IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity());
 
             reservedAssets += amt;
 
-            // Move the locked fee snapshot from pending into claimable. If the user already had
-            // unclaimed assets at a different locked fee, weighted-average by assets so each batch
-            // keeps its own fee contribution.
+            // Merge the queued fee snapshot into the claimable balance.
             uint256 oldClaim = claimableAssets[onBehalf];
             uint64 oldFee = claimableFee[onBehalf];
             if (oldClaim == 0) {
@@ -640,21 +600,14 @@ contract Vault is IVault, AccessManaged {
             claimableAssets[onBehalf] = uint128(oldClaim + amt);
             delete pendingWithdrawal[onBehalf];
             emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
-    /// @notice Partial-fulfillment variant: move a chosen `amounts[i]` of each `onBehalfs[i]`'s pending
-    /// request into their claimable balance (instead of the full pending amount). The remainder stays in
-    /// the queue for a later round. Useful when underlying liquidity arrives in batches (e.g. an RWA
-    /// custodian selling gold over multiple settlements) and the operator wants to flow it through to
-    /// requesters proportionally as it becomes available.
-    /// @dev Reverts if any `amounts[i]` exceeds that user's `pendingWithdrawal.assets`, or if the
-    /// requested total would exceed the unreserved idle balance. `pendingWithdrawal.shares` is reduced
-    /// proportionally (rounded down) so the per-user "burned shares" record stays consistent with the
-    /// remaining `assets`. The locked `feeAtRequest` on pending does NOT change (it was set at queue
-    /// time) and is propagated into `claimableFee` via the same weighted-average rule as the full
-    /// fulfill path.
+    /// @notice Partially fulfills pending withdrawals.
+    /// @dev Any remaining balance stays queued with the original fee snapshot.
     function fulfillWithdrawalPartial(address[] calldata onBehalfs, uint256[] calldata amounts)
         external
         onlyRole(ALLOCATOR_ROLE)
@@ -668,13 +621,11 @@ contract Vault is IVault, AccessManaged {
 
             PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
             require(amt > 0 && amt <= p.assets, ErrorsLib.InvalidRequest());
-            require(
-                IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity()
-            );
+            require(IERC20(asset).balanceOf(address(this)) - reservedAssets >= amt, ErrorsLib.InsufficientLiquidity());
 
             reservedAssets += amt;
 
-            // Weighted-average fee merge (same rule as the full-fulfill path).
+            // Merge the fee snapshot into the claimable balance.
             uint256 oldClaim = claimableAssets[onBehalf];
             uint64 oldFee = claimableFee[onBehalf];
             if (oldClaim == 0) {
@@ -685,37 +636,33 @@ contract Vault is IVault, AccessManaged {
             }
             claimableAssets[onBehalf] = uint128(oldClaim + amt);
 
-            // Reduce pending. If we drained it, delete the slot to free storage; otherwise shrink
-            // assets/shares proportionally and leave feeAtRequest as-is.
+            // Reduce the remaining queued balance.
             uint256 newAssets = uint256(p.assets) - amt;
             if (newAssets == 0) {
                 delete pendingWithdrawal[onBehalf];
             } else {
-                // shares ↓ in the same proportion as assets ↓ (round down — favors vault by leaving
-                // marginally more shares-per-asset recorded on the user's still-pending balance).
+                // Keep shares in proportion to the remaining assets.
                 uint256 newShares = (uint256(p.shares) * newAssets) / uint256(p.assets);
                 PendingWithdrawal storage ps = pendingWithdrawal[onBehalf];
                 ps.assets = newAssets.toUint128();
                 ps.shares = newShares.toUint128();
-                // ps.feeAtRequest unchanged
             }
 
             emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
-    /// @notice Settles a fulfilled (reserved) withdrawal of `onBehalf`. Permissionless — anyone may trigger,
-    /// assets always flow to `onBehalf` (not msg.sender). Payout is bounded by the operator-reserved
-    /// `claimableAssets[onBehalf]`, never the shared balance, so a fulfilled request cannot be jumped.
-    /// @dev The withdrawal fee is re-derived from the current `withdrawalFee` at claim time, not at request time.
+    /// @notice Settles a fulfilled withdrawal for `onBehalf`.
+    /// @dev Uses the fee snapshot stored when the request was queued and fulfilled.
     function claim(address onBehalf) external returns (uint256) {
         uint256 assetsOut = claimableAssets[onBehalf];
         require(assetsOut > 0, ErrorsLib.RequestNotPending());
         require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
 
-        // Use the fee snapshotted at request/fulfillment time, not the current `withdrawalFee`.
-        // Protects queued users from fee policy changes that happen between request and claim.
+        // Use the stored fee snapshot rather than the current withdrawal fee.
         uint256 lockedFee = claimableFee[onBehalf];
         claimableAssets[onBehalf] = 0;
         delete claimableFee[onBehalf];
@@ -734,13 +681,12 @@ contract Vault is IVault, AccessManaged {
         return netAssets;
     }
 
-    /// @notice Returns true iff `onBehalf` has an operator-fulfilled (reserved) amount ready to claim.
+    /// @notice Returns whether `onBehalf` has claimable assets.
     function isClaimable(address onBehalf) external view returns (bool) {
         return claimableAssets[onBehalf] > 0;
     }
 
-    /// @notice Aggregate liquidity immediately available for new withdrawals:
-    /// vault idle balance (minus pending queue obligations) plus on-demand strategy liquidity.
+    /// @notice Returns aggregate liquidity available for withdrawals.
     function availableLiquidity() external view returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
         if (strategyManager != address(0)) {
@@ -749,21 +695,15 @@ contract Vault is IVault, AccessManaged {
         return idle;
     }
 
-    /// @dev Returns shares burned as penalty.
-    /// @dev Penalty is taken from `onBehalf` to discourage allocation manipulations. Shares are burned
-    /// in place and the corresponding underlying stays in the vault (already there from the deallocate),
-    /// so totalAssets decreases proportionally with totalSupply (share price ≈ unchanged) while the
-    /// actually-held asset balance is preserved.
-    /// @dev Implemented directly (not via `withdraw`) so it always settles in the immediate path, never
-    /// entering the per-user withdrawal queue.
+    /// @dev Burns shares as a force-deallocation penalty.
+    /// The penalty is settled immediately and never enters the withdrawal queue.
     function forceDeallocate(address strategy, bytes memory data, uint256 assets, address onBehalf)
         external
         returns (uint256)
     {
         bytes32[] memory ids = deallocateInternal(strategy, data, assets);
 
-        uint256 penaltyAssets =
-            assets.mulDivUp(IStrategyManager(strategyManager).forceDeallocatePenalty(strategy), WAD);
+        uint256 penaltyAssets = assets.mulDivUp(IStrategyManager(strategyManager).forceDeallocatePenalty(strategy), WAD);
         accrueInterest();
         uint256 penaltyShares = previewWithdraw(penaltyAssets);
 
@@ -783,7 +723,7 @@ contract Vault is IVault, AccessManaged {
 
     /* ERC20 FUNCTIONS */
 
-    /// @dev Returns success (always true because reverts on failure).
+    /// @dev Always returns true on success.
     function transfer(address to, uint256 shares) external returns (bool) {
         require(to != address(0), ErrorsLib.ZeroAddress());
 
@@ -796,7 +736,7 @@ contract Vault is IVault, AccessManaged {
         return true;
     }
 
-    /// @dev Returns success (always true because reverts on failure).
+    /// @dev Always returns true on success.
     function transferFrom(address from, address to, uint256 shares) external returns (bool) {
         require(from != address(0), ErrorsLib.ZeroAddress());
         require(to != address(0), ErrorsLib.ZeroAddress());
@@ -818,14 +758,14 @@ contract Vault is IVault, AccessManaged {
         return true;
     }
 
-    /// @dev Returns success (always true because reverts on failure).
+    /// @dev Always returns true on success.
     function approve(address spender, uint256 shares) external returns (bool) {
         allowance[msg.sender][spender] = shares;
         emit EventsLib.Approval(msg.sender, spender, shares);
         return true;
     }
 
-    /// @dev Signature malleability is not explicitly prevented but it is not a problem thanks to the nonce.
+    /// @dev Nonces prevent replay even if a signature is malleable.
     function permit(address _owner, address spender, uint256 shares, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external
     {

@@ -9,15 +9,8 @@ import {AccessManaged} from "../AccessManaged.sol";
 import {ErrorsLib} from "../libraries/ErrorsLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 
-/// @notice Aave V2 supply strategy. Allocate routes underlying to the lending pool, deallocate withdraws
-/// it back. `totalAssets()` reads the aToken balance which rebases with Aave's accrued interest.
-///
-/// SAFETY (mirrors MorphoStrategy's emergency surface)
-/// @dev `writeOff` lets GOVERNANCE subtract a phantom amount from `totalAssets()`. Use when the Aave pool
-/// is broken/paused and the aToken balance is no longer realizable — prevents the vault NAV from counting
-/// assets we can't actually withdraw. Mirrors MorphoStrategy.burnShares.
-/// @dev `skim` lets `skimRecipient` recover reward tokens (stkAAVE) or mistakenly-sent tokens; the
-/// underlying asset and aToken itself are protected (they back vault NAV).
+/// @notice Aave V2 supply strategy.
+/// @dev `totalAssets()` tracks the strategy's aToken balance, net of any write-off.
 contract AquaStrategy is IStrategy, AccessManaged {
     /* IMMUTABLES */
 
@@ -25,16 +18,14 @@ contract AquaStrategy is IStrategy, AccessManaged {
     address public immutable asset;
     address public immutable lendingPool;
     address public immutable aToken;
-    /// @dev Stable, vault-wide identifier for this strategy instance. Used as `ids[0]` so the vault can
-    /// enforce an aggregate cap across this strategy.
+    /// @dev Strategy-level id used for aggregate caps.
     bytes32 public immutable adapterId;
 
     /* STORAGE */
 
-    /// @dev Destination for non-underlying token sweeps (rewards, donations, mis-sent tokens).
+    /// @dev Recipient for non-underlying token sweeps.
     address public skimRecipient;
-    /// @dev Amount subtracted from `totalAssets()` when reporting NAV. Monotonically increases via
-    /// `writeOff` — irreversible by design so an emergency call cannot be silently undone.
+    /// @dev Amount excluded from `totalAssets()`.
     uint256 public writtenOff;
 
     /* ERRORS */
@@ -78,11 +69,8 @@ contract AquaStrategy is IStrategy, AccessManaged {
         emit SetSkimRecipient(newSkimRecipient);
     }
 
-    /// @notice Emergency: increase the amount this strategy reports as un-realizable. Subtracts from
-    /// `totalAssets()` immediately so the vault NAV stops counting unwithdrawable balance.
-    /// @dev Monotonic — only increases. If governance later wants to "undo", they need a new vote to
-    /// e.g. redeploy a fresh strategy; we deliberately don't expose a decrease path so a single rogue
-    /// call cannot wipe the write-off.
+    /// @notice Increases the amount excluded from reported assets.
+    /// @dev The write-off is monotonic.
     function writeOff(uint256 amount) external onlyRole(GOVERNANCE_ROLE) {
         uint256 reported = IAaveV2AToken(aToken).balanceOf(address(this));
         uint256 newTotal = writtenOff + amount;
@@ -93,8 +81,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
 
     /* SKIM */
 
-    /// @notice Sweep an arbitrary token balance to `skimRecipient`. Useful for Aave reward tokens
-    /// (stkAAVE, etc.) or mistakenly-sent assets. The underlying and aToken are protected.
+    /// @notice Sweeps a non-underlying token balance to `skimRecipient`.
     function skim(address token) external {
         address recipient = skimRecipient;
         require(recipient != address(0), SkimRecipientUnset());
@@ -150,9 +137,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
         return poolLiquidity < total ? poolLiquidity : total;
     }
 
-    /// @dev Two-level id namespacing so the vault can apply caps at:
-    ///   ids[0] = this strategy as a whole (per-instance cap)
-    ///   ids[1] = the underlying aToken (groups all Aqua strategies pointing at the same aToken)
+    /// @dev Returns ids for strategy- and aToken-level caps.
     function _ids() internal view returns (bytes32[] memory ids_) {
         ids_ = new bytes32[](2);
         ids_[0] = adapterId;

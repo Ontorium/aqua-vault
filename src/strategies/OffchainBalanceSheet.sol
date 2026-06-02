@@ -5,25 +5,25 @@ pragma solidity ^0.8.24;
 import {ErrorsLib} from "../libraries/ErrorsLib.sol";
 import {EventsLib} from "../libraries/EventsLib.sol";
 
-/// @notice Internal accounting module for an offchain/RWA strategy.
-/// @dev This contract does not hold assets. It is intended to be inherited by OffchainNAVStrategy.
+/// @notice Internal accounting for an offchain strategy.
+/// @dev Intended to be inherited by OffchainNAVStrategy.
 abstract contract OffchainBalanceSheet {
     uint256 internal constant BPS = 10_000;
 
     struct Position {
-        // Current principal allocated from the Vault to this strategy.
+        // Principal allocated by the vault.
         uint128 allocatedPrincipal;
-        // Principal currently sent from this strategy to an offchain custodian/manager.
+        // Principal deployed to the offchain custodian.
         uint128 deployedPrincipal;
-        // Offchain NAV, excluding ERC20 assets currently held by this strategy.
+        // Reported offchain NAV, excluding onchain idle assets.
         uint128 reportedAssets;
-        // Offchain liquidity that can be requested quickly, excluding ERC20 assets currently held by this strategy.
+        // Reported offchain liquidity, excluding onchain idle assets.
         uint128 reportedAvailableLiquidity;
-        // Requested return amount not yet received by this strategy.
+        // Requested return amount that has not arrived onchain yet.
         uint128 pendingReceivable;
         uint64 lastReportTime;
         uint64 stalePeriod;
-        // Minimum seconds between successive NAV reports (anti-spam / rate limit).
+        // Minimum time between NAV reports.
         uint64 minReportInterval;
         bytes32 reportHash;
     }
@@ -98,15 +98,14 @@ abstract contract OffchainBalanceSheet {
         emit EventsLib.StrategyDeallocated(assets);
     }
 
-    /// @dev Records movement from onchain idle cash to offchain book value.
-    ///      This keeps realAssets stable immediately after funds are sent out.
+    /// @dev Moves idle onchain assets into offchain book value.
     function _recordCapitalDeployed(uint256 assets, address destination) internal {
         _position.deployedPrincipal = _toUint128(uint256(_position.deployedPrincipal) + assets);
         _position.reportedAssets = _toUint128(uint256(_position.reportedAssets) + assets);
         emit EventsLib.CapitalDeployed(assets, destination);
     }
 
-    /// @dev Moves value from reported offchain assets to pending receivable.
+    /// @dev Moves value from reported assets to pending receivable.
     function _recordReturnRequested(uint256 assets) internal {
         require(assets <= _position.reportedAssets, ErrorsLib.RequestExceedsReportedAssets());
         require(assets <= _position.reportedAvailableLiquidity, ErrorsLib.RequestExceedsAvailableLiquidity());
@@ -118,8 +117,8 @@ abstract contract OffchainBalanceSheet {
         emit EventsLib.ReturnRequested(assets);
     }
 
-    /// @dev Records assets that have arrived back onchain.
-    ///      It first clears pending receivable, then reduces reported assets if assets arrived without a prior request.
+    /// @dev Records assets received back onchain.
+    /// Clears pending receivable first, then reduces reported assets if needed.
     function _recordCapitalReturned(uint256 assets) internal {
         uint256 remaining = assets;
 
@@ -163,7 +162,7 @@ abstract contract OffchainBalanceSheet {
     ) internal {
         require(newReportedAvailableLiquidity <= newReportedAssets, ErrorsLib.AvailableExceedsReportedAssets());
 
-        // Rate-limit consecutive NAV updates.
+        // Enforce the minimum report interval.
         if (_position.lastReportTime != 0 && _position.minReportInterval != 0) {
             require(
                 block.timestamp >= uint256(_position.lastReportTime) + uint256(_position.minReportInterval),

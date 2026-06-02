@@ -13,19 +13,8 @@ import {AccessManaged} from "../AccessManaged.sol";
 import {ErrorsLib} from "../libraries/ErrorsLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 
-/// @notice Morpho Blue supply strategy, modeled after Morpho's `MorphoMarketV1AdapterV2` but adapted to
-/// the aqua-vault role/scope model. Supplies vault underlying to whitelisted Morpho markets and reports
-/// the accrued position as `totalAssets()`.
-///
-/// SAFETY
-/// @dev Markets must use an IRM whitelisted by GOVERNANCE (`setIrmApproved`). Allocations are rejected
-/// otherwise; deallocations are not restricted so the vault can always exit a market whose IRM is later
-/// revoked.
-/// @dev If a market's IRM/oracle breaks (`expectedSupplyAssets` reverts), `totalAssets()` reverts and the
-/// vault cannot accrue interest. GOVERNANCE can call `burnShares(marketId)` to write the position off and
-/// remove it from the active list — the actual shares stay on Morpho but stop polluting the vault NAV.
-/// @dev `mintedShares >= assets` is required on supply, a defense-in-depth check against share-price
-/// inflation in newly-created markets. Morpho Blue requires an initial supply but this is a second guard.
+/// @notice Morpho Blue supply strategy for whitelisted markets.
+/// @dev Governance can write off a market with `burnShares` if reporting becomes unsafe.
 contract MorphoStrategy is IStrategy, AccessManaged {
     using MorphoBalancesLib for IMorpho;
     using MarketParamsLib for MarketParams;
@@ -36,22 +25,20 @@ contract MorphoStrategy is IStrategy, AccessManaged {
     address public immutable vault;
     address public immutable asset;
     IMorpho public immutable morpho;
-    /// @dev Stable, vault-wide identifier for this strategy instance. Used as `ids[0]` so the vault can
-    /// enforce an aggregate cap across all of this strategy's markets.
+    /// @dev Strategy-level id used for aggregate caps.
     bytes32 public immutable adapterId;
 
     /* STORAGE */
 
     Id[] internal _marketIds;
     mapping(Id marketId => uint256) internal _marketIndexPlusOne;
-    /// @dev Stored `MarketParams` per registered market. Required for view paths (no `data` arg).
+    /// @dev Cached market params for view paths.
     mapping(Id marketId => MarketParams) internal _marketParams;
-    /// @dev Locally tracked supply shares per market. The single source of truth for `totalAssets()`,
-    /// so `burnShares` can write off a market without touching Morpho's storage.
+    /// @dev Locally tracked supply shares per market.
     mapping(Id marketId => uint256) public supplyShares;
-    /// @dev Allowlist of IRM contracts that markets may use. GOVERNANCE manages this set.
+    /// @dev Allowlist of IRM contracts.
     mapping(address irm => bool) public irmApproved;
-    /// @dev Destination for non-underlying token sweeps (rewards, donations, mis-sent tokens).
+    /// @dev Recipient for non-underlying token sweeps.
     address public skimRecipient;
 
     /* ERRORS */
@@ -102,7 +89,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         return _marketParams[marketId];
     }
 
-    /// @dev Returns this strategy's projected supply assets on a market (interest-accrued, view-only).
+    /// @dev Returns the projected supply assets for `marketId`.
     function expectedSupplyAssets(Id marketId) external view returns (uint256) {
         return _expectedSupplyAssets(marketId, _marketParams[marketId]);
     }
@@ -120,10 +107,8 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         emit SetSkimRecipient(newSkimRecipient);
     }
 
-    /// @notice Emergency: zero out this strategy's tracked shares on a market. `totalAssets()` immediately
-    /// stops counting the position and the market is removed from the active list.
-    /// @dev The actual shares remain on Morpho (lost forever). Use when an IRM/oracle is broken or a market
-    /// is otherwise compromised and reporting an inflated NAV.
+    /// @notice Writes off a market by zeroing its tracked shares.
+    /// @dev The underlying Morpho position remains untouched.
     function burnShares(Id marketId) external onlyRole(GOVERNANCE_ROLE) {
         uint256 sharesBefore = supplyShares[marketId];
         if (sharesBefore == 0) return;
@@ -134,8 +119,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
 
     /* SKIM */
 
-    /// @notice Sweep an arbitrary token balance to `skimRecipient`. Useful for Morpho reward tokens
-    /// or mistakenly-sent assets. Cannot skim the strategy's underlying asset (that backs vault NAV).
+    /// @notice Sweeps a non-underlying token balance to `skimRecipient`.
     function skim(address token) external {
         address recipient = skimRecipient;
         require(recipient != address(0), SkimRecipientUnset());
@@ -165,7 +149,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
             (, uint256 mintedShares) = morpho.supply(mp, assets, 0, address(this), hex"");
             require(mintedShares >= assets, SharePriceAboveOne());
             supplyShares[marketId] += mintedShares;
-            // First time we see this market: snapshot its params so views can query MorphoBalancesLib.
+            // Cache market params for subsequent view calls.
             if (_marketParams[marketId].loanToken == address(0)) _marketParams[marketId] = mp;
         }
 
@@ -183,8 +167,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
     {
         MarketParams memory mp = abi.decode(data, (MarketParams));
         require(mp.loanToken == asset, LoanAssetMismatch());
-        // Intentionally NO `irmApproved` check — we want to always be able to exit a market whose IRM
-        // was later un-approved or is otherwise broken.
+        // Do not block exits if a market later becomes unapproved.
 
         Id marketId = mp.id();
         uint256 oldAssets = _expectedSupplyAssets(marketId, mp);
@@ -212,7 +195,9 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         for (uint256 i; i < len;) {
             Id marketId = _marketIds[i];
             total += _expectedSupplyAssets(marketId, _marketParams[marketId]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -226,15 +211,15 @@ contract MorphoStrategy is IStrategy, AccessManaged {
             uint256 onMarket = _expectedSupplyAssets(marketId, mp);
             uint256 free = totalSupplyAssets > totalBorrowAssets ? totalSupplyAssets - totalBorrowAssets : 0;
             liquidity += free < onMarket ? free : onMarket;
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
     /* INTERNAL HELPERS */
 
-    /// @dev Projects this strategy's supply assets on a market from our locally tracked shares, using
-    /// MorphoBalancesLib's interest-accrued totals. Returns 0 short-circuit if we have no shares (so a
-    /// market burned via `burnShares` contributes 0 even if it's still in the list).
+    /// @dev Projects supply assets from locally tracked shares.
     function _expectedSupplyAssets(Id marketId, MarketParams memory mp) internal view returns (uint256) {
         uint256 shares = supplyShares[marketId];
         if (shares == 0) return 0;
@@ -242,10 +227,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         return shares.toAssetsDown(totalSupplyAssets, totalSupplyShares);
     }
 
-    /// @dev Multi-level id namespacing so the vault can apply caps at three granularities:
-    ///   ids[0] = this strategy as a whole (every market goes through it)
-    ///   ids[1] = the collateral token used by the market (groups all markets sharing it)
-    ///   ids[2] = the specific market
+    /// @dev Returns ids for strategy-, collateral-, and market-level caps.
     function _ids(MarketParams memory mp) internal view returns (bytes32[] memory ids_) {
         ids_ = new bytes32[](3);
         ids_[0] = adapterId;
@@ -273,7 +255,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
 
             _marketIds.pop();
             delete _marketIndexPlusOne[marketId];
-            // Keep `_marketParams[marketId]` so a re-entry can reuse the snapshot; cheap & harmless.
+            // Keep cached params so a later re-entry can reuse them.
         }
     }
 }

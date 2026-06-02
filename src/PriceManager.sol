@@ -12,12 +12,10 @@ import {AccessManaged} from "./AccessManaged.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
 
-/// @notice Base share price calculation manager for a single Vault with a dedicated offchain NAV strategy.
-/// @dev The Vault remains the source of truth for ERC4626 pricing. This contract only coordinates NAV updates,
-/// triggers Vault accrual, and snapshots the resulting share price.
-/// @dev NAV updaters are role members in the central RoleManager (per-PriceManager scoped role).
+/// @notice Coordinates NAV updates for a vault with an offchain strategy.
+/// @dev The vault remains the source of truth for ERC-4626 pricing.
 contract PriceManager is IPriceManager, AccessManaged {
-    /// @dev Per-PriceManager scoped role name. Combined with address(this) via `_scopedRole(...)`.
+    /// @dev Role used for NAV updates on this instance.
     bytes32 internal constant NAV_UPDATER = keccak256("NAV_UPDATER");
 
     uint256 internal constant WAD = 1e18;
@@ -42,9 +40,7 @@ contract PriceManager is IPriceManager, AccessManaged {
         public
         virtual
     {
-        require(
-            roleManager.hasRole(_scopedRole(NAV_UPDATER), msg.sender), ErrorsLib.Unauthorized()
-        );
+        require(roleManager.hasRole(_scopedRole(NAV_UPDATER), msg.sender), ErrorsLib.Unauthorized());
 
         IOffchainNAVStrategy(offchainStrategy).report(netAssetValue, availableLiquidity, reportHash, reportURI);
         IVault(vault).syncReportedNAV();
@@ -66,7 +62,8 @@ contract PriceManager is IPriceManager, AccessManaged {
         );
     }
 
-    // Helpers
+    /* VIEWS */
+
     function pricePerShare() public view returns (uint256) {
         return metrics.pricePerShare;
     }

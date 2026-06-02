@@ -10,13 +10,10 @@ import {ErrorsLib} from "../libraries/ErrorsLib.sol";
 import {EventsLib} from "../libraries/EventsLib.sol";
 import {SafeERC20Lib} from "../libraries/SafeERC20Lib.sol";
 
-/// @notice RWA/offchain strategy with its own internal BalanceSheet.
-/// @dev The Vault keeps user share accounting. This strategy keeps offchain position accounting.
-/// @dev Reporter/manager are NOT stored locally — they are role memberships in the central RoleManager.
-///      Per-strategy scoping is achieved with `_scopedRole(OFFCHAIN_REPORTER)` etc., so a reporter for
-///      one strategy is NOT automatically a reporter for another.
+/// @notice Offchain strategy with internal balance-sheet accounting.
+/// @dev Reporter and manager permissions are delegated to the shared RoleManager.
 contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, AccessManaged {
-    /// @dev Per-strategy scoped role names. Combined with address(this) via `_scopedRole(...)`.
+    /// @dev Per-instance role names.
     bytes32 internal constant OFFCHAIN_REPORTER = keccak256("OFFCHAIN_REPORTER");
     bytes32 internal constant OFFCHAIN_MANAGER = keccak256("OFFCHAIN_MANAGER");
 
@@ -25,17 +22,10 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     address public custodian;
     uint256 public maxChangeBps;
-    /// @dev Destination for non-underlying token sweeps (RWA-related reward drops, mistakenly-sent
-    /// tokens, etc.). The strategy's `asset` is protected so a skim cannot drain NAV backing.
+    /// @dev Recipient for non-underlying token sweeps.
     address public skimRecipient;
 
-    /// @dev Return-flow accounting mode.
-    /// - `false` (Simple, default): `requestReturn`/`recordReturn` are disabled. The custodian sends
-    ///   underlying directly to this strategy and the REPORTER reflects the change in the next
-    ///   `report()` (by lowering `reportedAssets`). Fewer onchain steps, no in-transit tracking.
-    /// - `true` (Strict): `requestReturn`/`recordReturn` are enabled, producing an auditable
-    ///   "request → in-transit (`pendingReceivable`) → arrival" trail on every return. Use for
-    ///   external custodians or regulated RWA where in-transit visibility matters.
+    /// @dev If true, return flows are tracked onchain via `requestReturn` and `recordReturn`.
     bool public strictMode;
 
     error CannotSkimUnderlying();
@@ -53,16 +43,12 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     }
 
     modifier onlyManager() {
-        require(
-            roleManager.hasRole(_scopedRole(OFFCHAIN_MANAGER), msg.sender), ErrorsLib.Unauthorized()
-        );
+        require(roleManager.hasRole(_scopedRole(OFFCHAIN_MANAGER), msg.sender), ErrorsLib.Unauthorized());
         _;
     }
 
     modifier onlyReporter() {
-        require(
-            roleManager.hasRole(_scopedRole(OFFCHAIN_REPORTER), msg.sender), ErrorsLib.Unauthorized()
-        );
+        require(roleManager.hasRole(_scopedRole(OFFCHAIN_REPORTER), msg.sender), ErrorsLib.Unauthorized());
         _;
     }
 
@@ -111,8 +97,8 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         emit SetSkimRecipient(newSkimRecipient);
     }
 
-    /// @notice Toggle the return-flow accounting mode. Switching to Simple is rejected if a strict-mode
-    /// in-transit balance is still outstanding (drain `pendingReceivable` first via `recordReturn`).
+    /// @notice Sets the return-flow accounting mode.
+    /// @dev Strict mode cannot be disabled while `pendingReceivable` is non-zero.
     function setStrictMode(bool _strict) external onlyRole(GOVERNANCE_ROLE) {
         if (!_strict && _position.pendingReceivable != 0) revert PendingReceivableNonZero();
         strictMode = _strict;
@@ -121,9 +107,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     /* SKIM */
 
-    /// @notice Sweep an arbitrary token balance to `skimRecipient`. Defensive recovery for RWA reward
-    /// drops or mistakenly-sent tokens. The strategy's `asset` is protected — it backs vault NAV via
-    /// `idle` and cannot be skimmed out.
+    /// @notice Sweeps a non-underlying token balance to `skimRecipient`.
     function skim(address token) external {
         address recipient = skimRecipient;
         require(recipient != address(0), SkimRecipientUnset());
@@ -137,8 +121,8 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     /* VAULT STRATEGY INTERFACE */
 
-    /// @notice Total assets counted by the Vault.
-    /// @dev If the offchain report is stale, only onchain idle assets are counted.
+    /// @notice Returns the assets counted by the vault.
+    /// @dev Falls back to onchain idle assets while reports are stale.
     function realAssets() external view override returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this));
         if (isStale()) return idle;
@@ -153,8 +137,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         return idle + uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
     }
 
-    /// @notice Liquidity that can be used or requested for withdrawals.
-    /// @dev Onchain idle is immediately available. Reported liquidity is offchain-available, not already onchain.
+    /// @notice Returns available liquidity for withdrawals.
     function availableLiquidity() external view override returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this));
         if (isStale()) return idle;
@@ -162,7 +145,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         return idle + uint256(_position.reportedAvailableLiquidity);
     }
 
-    /// @dev Allocation means the Vault already transferred `assets` to this strategy.
+    /// @dev The vault transfers assets before calling this hook.
     function allocate(bytes memory, uint256 assets, bytes4, address)
         external
         override
@@ -176,8 +159,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         change = int256(assets);
     }
 
-    /// @dev Deallocation can only return assets already held by this strategy onchain.
-    ///      Offchain assets must be returned to the strategy first.
+    /// @dev Only onchain assets can be returned here.
     function deallocate(bytes memory, uint256 assets, bytes4, address)
         external
         override
@@ -201,14 +183,12 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     /* OFFCHAIN CAPITAL FLOW */
 
-    /// @notice Sends onchain idle assets from this strategy to the configured custodian.
-    /// @dev This records the transfer as offchain book value at cost until the next NAV report.
+    /// @notice Sends idle assets to the configured custodian.
     function deployToCustodian(uint256 assets) external onlyManager {
         _deployToCustodian(custodian, assets);
     }
 
-    /// @notice Sends onchain idle assets from this strategy to a specific destination.
-    /// @dev Use this only if the destination is part of the approved custody process.
+    /// @notice Sends idle assets to a specific destination.
     function deployToCustodian(address destination, uint256 assets) external onlyManager {
         _deployToCustodian(destination, assets);
     }
@@ -221,19 +201,15 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         _recordCapitalDeployed(assets, destination);
     }
 
-    /// @notice [Strict mode only] Mark `assets` as in-transit: shifts the amount from
-    /// `reportedAvailableLiquidity` into `pendingReceivable`. No ERC20 movement. Reverts in Simple mode.
-    /// @dev Use when a return has been requested from the custodian but has not arrived onchain yet,
-    /// to expose in-transit balance for audit/UI. Pair with {recordReturn} on arrival.
+    /// @notice Marks assets as in transit from the custodian.
+    /// @dev Available only in strict mode.
     function requestReturn(uint256 assets) external onlyManager {
         if (!strictMode) revert StrictModeRequired();
         _recordReturnRequested(assets);
     }
 
-    /// @notice [Strict mode only] Confirm that custodian's transfer of `assets` has arrived; drains
-    /// `pendingReceivable` and `deployedPrincipal`. Reverts in Simple mode.
-    /// @dev The custodian must transfer tokens to this strategy before this call. In Simple mode,
-    /// custodian transfers are reconciled solely via the next `report()` lowering `reportedAssets`.
+    /// @notice Records assets returned by the custodian.
+    /// @dev Available only in strict mode.
     function recordReturn(uint256 assets) external onlyManager {
         if (!strictMode) revert StrictModeRequired();
         require(IERC20(asset).balanceOf(address(this)) >= assets, ErrorsLib.ReturnNotReceived());
@@ -242,10 +218,10 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     /* NAV REPORTING */
 
-    /// @notice Reports offchain NAV.
-    /// @param newReportedAssets Offchain NAV excluding ERC20 assets currently held by this strategy.
-    /// @param newReportedAvailableLiquidity Offchain liquidity excluding ERC20 assets currently held by this strategy.
-    /// @param newPendingReceivable Requested but not-yet-received return amount.
+    /// @notice Reports offchain NAV and liquidity.
+    /// @param newReportedAssets Offchain NAV excluding onchain idle assets.
+    /// @param newReportedAvailableLiquidity Offchain liquidity excluding onchain idle assets.
+    /// @param newPendingReceivable Return amount requested but not yet received.
     function report(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,
@@ -271,21 +247,14 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         _recordNAVReport(newReportedAssets, 0, 0, newReportHash, newReportURI, maxChangeBps);
     }
 
-    /// @notice Backward-compatible report function with available liquidity.
+    /// @notice Backward-compatible report function with liquidity.
     function report(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,
         bytes32 newReportHash,
         string calldata newReportURI
     ) external override onlyReporter {
-        _recordNAVReport(
-            newReportedAssets,
-            newReportedAvailableLiquidity,
-            0,
-            newReportHash,
-            newReportURI,
-            maxChangeBps
-        );
+        _recordNAVReport(newReportedAssets, newReportedAvailableLiquidity, 0, newReportHash, newReportURI, maxChangeBps);
     }
 
     function _approveVault(uint256 assets) internal {

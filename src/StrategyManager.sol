@@ -17,8 +17,8 @@ import {EventsLib} from "./libraries/EventsLib.sol";
 import "./libraries/ConstantsLib.sol";
 import {MathLib} from "./libraries/MathLib.sol";
 
-/// @notice Holds strategy configuration, caps, allocation accounting, and optional rebalance execution.
-/// @dev This contract never holds vault assets. The Vault keeps custody and performs all token transfers.
+/// @notice Stores strategy configuration and cap accounting for a vault.
+/// @dev Asset custody remains in the vault.
 contract StrategyManager is IStrategyManager, AccessManaged {
     using MathLib for uint256;
     using MathLib for int256;
@@ -88,8 +88,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         return caps[id].allocation;
     }
 
-    /// @notice Returns the current assets reported by a strategy.
-    /// @dev This is intentionally read from the strategy, not stored here.
+    /// @notice Returns the assets currently reported by `strategy`.
     function strategyAllocation(address strategy) public view returns (uint256) {
         if (!isStrategy(strategy)) return 0;
         return IStrategy(strategy).totalAssets();
@@ -129,7 +128,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                 totalAssets: IStrategy(strategy).totalAssets(),
                 availableLiquidity: _availableLiquidityOf(strategy)
             });
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -143,7 +144,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                     IStrategyRegistry(newStrategyRegistry).isInRegistry(_strategies[i]),
                     ErrorsLib.NotInStrategyRegistry()
                 );
-                unchecked { ++i; }
+                unchecked {
+                    ++i;
+                }
             }
         }
 
@@ -162,7 +165,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         uint256 indexPlusOne = _strategyIndexPlusOne[strategy];
         require(indexPlusOne != 0, ErrorsLib.NotStrategy());
 
-        // A strategy must be fully emptied before removal.
+        // A strategy must be empty before removal.
         require(strategyAllocation(strategy) == 0, ErrorsLib.ZeroAllocation());
         require(IStrategy(strategy).realAssets() == 0, ErrorsLib.ZeroAllocation());
 
@@ -249,7 +252,10 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.DecreaseRelativeCap(msg.sender, id, idData, newRelativeCap);
     }
 
-    function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external onlyRole(GOVERNANCE_ROLE) {
+    function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty)
+        external
+        onlyRole(GOVERNANCE_ROLE)
+    {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
         require(newForceDeallocatePenalty <= MAX_FORCE_DEALLOCATE_PENALTY, ErrorsLib.PenaltyTooHigh());
 
@@ -259,8 +265,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     /* VAULT HOOKS */
 
-    /// @notice Vault-only cap accounting hook called after Vault.allocate runs IStrategy.allocate.
-    /// @dev Vault holds the assets and orchestrates the strategy call; this contract only validates and updates accounting.
+    /// @notice Updates cap accounting after a vault allocation.
     function onAllocate(address strategy, bytes32[] memory ids, int256 change, uint256 totalAssetsForCaps)
         external
         onlyVault
@@ -279,7 +284,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                 _caps.relativeCap == WAD || _caps.allocation <= totalAssetsForCaps.mulDivDown(_caps.relativeCap, WAD),
                 ErrorsLib.RelativeCapExceeded()
             );
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
@@ -287,8 +294,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.AfterAllocate(strategy, ids, change, strategyAllocation(strategy));
     }
 
-    /// @notice Vault-only cap accounting hook called after Vault.deallocate runs IStrategy.deallocate.
-    /// @dev Intentionally does not check `active`: paused strategies must still allow withdrawals.
+    /// @notice Updates cap accounting after a vault deallocation.
+    /// @dev Does not enforce `active` so inactive strategies can still unwind.
     function onDeallocate(address strategy, bytes32[] memory ids, int256 change) external onlyVault {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
 
@@ -297,7 +304,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             Caps storage _caps = caps[ids[i]];
             require(_caps.allocation > 0, ErrorsLib.ZeroAllocation());
             _caps.allocation = (int256(_caps.allocation) + change).toUint256();
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         emit EventsLib.AfterDeallocate(strategy, ids, change, strategyAllocation(strategy));
@@ -305,11 +314,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     /* ALLOCATION HELPERS */
 
-    /// @notice Optional rebalance helper.
-    /// @dev This contract still never holds assets. It only calls Vault.allocate/deallocate.
-    ///      You can skip this and let allocators call the Vault directly.
-    /// @dev For Vault.allocate/deallocate to succeed when relayed through here, this SM contract
-    ///      address must hold ALLOCATOR_ROLE (or SENTINEL_ROLE for the deallocate path) in RoleManager.
+    /// @notice Optional helper that relays allocate and deallocate calls to the vault.
+    /// @dev This contract must hold the required allocator roles for the relayed calls.
     function rebalance(RebalanceAction[] calldata actions) external {
         _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
         uint256 len = actions.length;
@@ -319,7 +325,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             } else {
                 IVault(vault).deallocate(actions[i].strategy, actions[i].data, actions[i].assets);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         emit EventsLib.Rebalance(msg.sender, len);
@@ -331,7 +339,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         uint256 len = _strategies.length;
         for (uint256 i; i < len;) {
             totalAssets += IStrategy(_strategies[i]).totalAssets();
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -339,7 +349,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         uint256 len = _strategies.length;
         for (uint256 i; i < len;) {
             liquidity += _availableLiquidityOf(_strategies[i]);
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -350,7 +362,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
                 totalAssets += IStrategy(strategy).totalAssets();
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -361,7 +375,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
                 liquidity += _availableLiquidityOf(strategy);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -372,7 +388,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
                 totalAssets += IStrategy(strategy).totalAssets();
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -383,7 +401,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
                 liquidity += _availableLiquidityOf(strategy);
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -403,11 +423,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             _strategyIndexPlusOne[strategy] = _strategies.length;
 
             strategyConfig[strategy] = StrategyConfig({
-                exists: true,
-                active: true,
-                capBps: uint16(capBps),
-                targetBps: uint16(targetBps),
-                kind: kind
+                exists: true, active: true, capBps: uint16(capBps), targetBps: uint16(targetBps), kind: kind
             });
 
             emit EventsLib.AddStrategy(strategy);
@@ -430,8 +446,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         if (capBps == 0) return;
 
         require(
-            strategyAllocation(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS),
-            ErrorsLib.RelativeCapExceeded()
+            strategyAllocation(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS), ErrorsLib.RelativeCapExceeded()
         );
     }
 }
