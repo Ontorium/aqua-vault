@@ -500,4 +500,51 @@ contract WithdrawalQueueTest is BaseTest {
         vm.expectRevert(ErrorsLib.InsufficientLiquidity.selector);
         vault.fulfillWithdrawalPartial(users, amts);
     }
+
+    /// @notice Multiple partial fulfills on the same user accumulate into a single claimable balance.
+    /// Common in RWA flows where custodian liquidity arrives in successive batches.
+    function testPartialFulfillAccumulatesAcrossCalls() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        vm.prank(alice);
+        vault.withdraw(1_000e18, alice, alice);
+
+        // First batch: 400 lands.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 400e18);
+        address[] memory u = new address[](1);
+        uint256[] memory a = new uint256[](1);
+        u[0] = alice; a[0] = 400e18;
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(u, a);
+        assertEq(uint256(vault.claimableAssets(alice)), 400e18, "first batch claimable");
+
+        // Second batch: 300 lands, accumulates into claimable.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 300e18);
+        a[0] = 300e18;
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(u, a);
+        assertEq(uint256(vault.claimableAssets(alice)), 700e18, "claimable accumulated");
+
+        // Pending still has 300 remaining.
+        (uint128 stillPending,,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(stillPending), 300e18, "300 left pending");
+
+        // Alice claims the accumulated 700 in one shot.
+        vault.claim(alice);
+        assertEq(underlyingToken.balanceOf(alice), 700e18, "received accumulated");
+    }
+
+    /// @notice Empty-array call is a no-op (length matches, loop runs 0 times). Useful as a
+    /// permissioned heartbeat / scheduler default.
+    function testPartialFulfillEmptyArraysIsNoop() public {
+        address[] memory users = new address[](0);
+        uint256[] memory amts = new uint256[](0);
+
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(users, amts);
+        // No state changes — nothing to assert beyond non-revert.
+    }
 }

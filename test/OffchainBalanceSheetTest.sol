@@ -302,4 +302,65 @@ contract OffchainBalanceSheetTest is BaseTest {
         // Stale: only onchain idle counts.
         assertEq(strategy.totalAssets(), amount);
     }
+
+    /* ── skim (defensive token recovery) ──────────────────────────────────────── */
+
+    function testSkimRecoversNonProtectedToken() public {
+        address recipient = makeAddr("skimRecipient");
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 500e18);
+
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        vm.prank(recipient);
+        strategy.skim(address(rewardToken));
+
+        assertEq(rewardToken.balanceOf(recipient), 500e18);
+        assertEq(rewardToken.balanceOf(address(strategy)), 0);
+    }
+
+    /// @notice The underlying asset is protected — skim cannot touch it (otherwise vault NAV idle would
+    /// drain).
+    function testSkimRevertsOnUnderlying() public {
+        address recipient = makeAddr("skimRecipient");
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        underlyingToken.mint(address(strategy), 100e18);
+
+        vm.prank(recipient);
+        vm.expectRevert(OffchainNAVStrategy.CannotSkimUnderlying.selector);
+        strategy.skim(address(underlyingToken));
+    }
+
+    function testSkimOnlyRecipientCanCall(address rdm) public {
+        address recipient = makeAddr("skimRecipient");
+        vm.assume(rdm != recipient);
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 100e18);
+
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.skim(address(rewardToken));
+    }
+
+    function testSkimRevertsWhenRecipientUnset() public {
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 100e18);
+
+        // Default skimRecipient is address(0).
+        vm.expectRevert(OffchainNAVStrategy.SkimRecipientUnset.selector);
+        strategy.skim(address(rewardToken));
+    }
+
+    function testSetSkimRecipientOnlyGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.setSkimRecipient(makeAddr("anyone"));
+    }
 }

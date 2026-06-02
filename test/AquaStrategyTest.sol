@@ -232,4 +232,149 @@ contract AquaStrategyTest is BaseTest {
         skip(365 days);
         assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault sees Aave interest");
     }
+
+    /* ── writeOff (phantom asset NAV reduction) ───────────────────────────────── */
+
+    /// @notice writeOff(amount) subtracts from totalAssets() and is monotonic — multiple calls
+    /// accumulate but never decrease. Mirrors burnShares semantics for non-per-market protocols.
+    function testWriteOffReducesTotalAssets() public {
+        _fundAndAllocateAs(1_000e18);
+        assertEq(strategy.totalAssets(), 1_000e18, "baseline");
+
+        vm.prank(governance);
+        strategy.writeOff(300e18);
+
+        assertEq(strategy.writtenOff(), 300e18);
+        assertEq(strategy.totalAssets(), 700e18, "writeOff applied");
+        assertEq(strategy.realAssets(), 700e18, "realAssets mirrors totalAssets");
+    }
+
+    function testWriteOffIsMonotonicallyAccumulating() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.startPrank(governance);
+        strategy.writeOff(200e18);
+        strategy.writeOff(150e18);
+        vm.stopPrank();
+
+        assertEq(strategy.writtenOff(), 350e18, "two writeOffs sum");
+        assertEq(strategy.totalAssets(), 650e18);
+    }
+
+    function testWriteOffCannotExceedAToken() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(governance);
+        vm.expectRevert(AquaStrategy.WriteOffExceedsBalance.selector);
+        strategy.writeOff(1_001e18);
+    }
+
+    function testWriteOffOnlyGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.writeOff(100e18);
+    }
+
+    function testWriteOffAvailableLiquidityFollowsTotal() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(governance);
+        strategy.writeOff(400e18);
+
+        // availableLiquidity = min(poolLiquidity, totalAssets) → capped by post-writeOff total.
+        assertEq(strategy.availableLiquidity(), 600e18, "available follows total");
+    }
+
+    /// @notice Edge: a full writeOff (== aToken balance) collapses totalAssets to 0; subsequent Aave
+    /// interest accrual brings the position back above the written-off floor, restoring NAV
+    /// proportionally. Verifies the `raw > wo ? raw - wo : 0` branch.
+    function testWriteOffThenInterestRecoversProportionally() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(governance);
+        strategy.writeOff(1_000e18);
+        assertEq(strategy.totalAssets(), 0, "fully written off to 0");
+
+        // Aave interest grows the aToken balance past the floor.
+        aToken.accrue(address(strategy), 250e18);
+        assertEq(strategy.totalAssets(), 250e18, "post-floor interest surfaces in NAV");
+    }
+
+    /* ── skim (defensive token recovery) ──────────────────────────────────────── */
+
+    /// @notice skim sweeps an arbitrary non-protected token to skimRecipient. Common use: stkAAVE
+    /// reward drops or mistakenly-sent tokens.
+    function testSkimRecoversNonProtectedToken() public {
+        address recipient = makeAddr("skimRecipient");
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 500e18);
+
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        vm.prank(recipient);
+        strategy.skim(address(rewardToken));
+
+        assertEq(rewardToken.balanceOf(recipient), 500e18, "recipient got reward");
+        assertEq(rewardToken.balanceOf(address(strategy)), 0, "strategy drained");
+    }
+
+    /// @notice The strategy's `asset` (underlying) is protected — skim cannot drain NAV backing.
+    function testSkimRevertsOnUnderlying() public {
+        address recipient = makeAddr("skimRecipient");
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        underlyingToken.mint(address(strategy), 100e18);
+
+        vm.prank(recipient);
+        vm.expectRevert(AquaStrategy.CannotSkimUnderlying.selector);
+        strategy.skim(address(underlyingToken));
+    }
+
+    /// @notice The aToken is protected — skim cannot drain the supply position.
+    function testSkimRevertsOnAToken() public {
+        address recipient = makeAddr("skimRecipient");
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        _fundAndAllocateAs(100e18);
+
+        vm.prank(recipient);
+        vm.expectRevert(AquaStrategy.CannotSkimAToken.selector);
+        strategy.skim(address(aToken));
+    }
+
+    function testSkimOnlyRecipientCanCall(address rdm) public {
+        address recipient = makeAddr("skimRecipient");
+        vm.assume(rdm != recipient);
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 100e18);
+
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.skim(address(rewardToken));
+    }
+
+    function testSkimRevertsWhenRecipientUnset() public {
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 100e18);
+
+        // Default skimRecipient is address(0).
+        vm.expectRevert(AquaStrategy.SkimRecipientUnset.selector);
+        strategy.skim(address(rewardToken));
+    }
+
+    function testSetSkimRecipientOnlyGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.setSkimRecipient(makeAddr("anyone"));
+    }
 }
