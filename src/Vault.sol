@@ -23,6 +23,11 @@ contract Vault is IVault, AccessManaged {
     using MathLib for uint128;
     using MathLib for int256;
 
+    struct ClaimableWithdrawal {
+        uint128 assets;
+        uint64 fee;
+    }
+
     /* IMMUTABLE */
 
     address public immutable asset;
@@ -75,10 +80,8 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Per-user withdrawal queue entry.
     mapping(address onBehalf => PendingWithdrawal) public pendingWithdrawal;
-    /// @dev Assets reserved for fulfilled withdrawals.
-    mapping(address onBehalf => uint128) public claimableAssets;
-    /// @dev Fee snapshot applied when claimable withdrawals are settled.
-    mapping(address onBehalf => uint64) public claimableFee;
+    /// @dev Assets and fee snapshots reserved for fulfilled withdrawals.
+    mapping(address onBehalf => ClaimableWithdrawal) internal _claimableWithdrawal;
     /// @dev Total assets reserved for fulfilled withdrawals.
     uint256 public reservedAssets;
     /// @dev Total assets owed to queued or fulfilled withdrawals.
@@ -101,6 +104,14 @@ contract Vault is IVault, AccessManaged {
     function totalAssets() external view returns (uint256) {
         (uint256 newTotalAssets,,) = accrueInterestView();
         return newTotalAssets;
+    }
+
+    function claimableAssets(address onBehalf) external view returns (uint128) {
+        return _claimableWithdrawal[onBehalf].assets;
+    }
+
+    function claimableFee(address onBehalf) external view returns (uint64) {
+        return _claimableWithdrawal[onBehalf].fee;
     }
 
     /// forge-lint: disable-next-item(mixed-case-function)
@@ -594,15 +605,15 @@ contract Vault is IVault, AccessManaged {
             newReserved += amt;
 
             // Merge the queued fee snapshot into the claimable balance.
-            uint256 oldClaim = claimableAssets[onBehalf];
-            uint64 oldFee = claimableFee[onBehalf];
+            ClaimableWithdrawal storage claimable = _claimableWithdrawal[onBehalf];
+            uint256 oldClaim = claimable.assets;
+            uint64 oldFee = claimable.fee;
             if (oldClaim == 0) {
-                claimableFee[onBehalf] = p.feeAtRequest;
+                claimable.fee = p.feeAtRequest;
             } else if (oldFee != p.feeAtRequest) {
-                claimableFee[onBehalf] =
-                    uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
+                claimable.fee = uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
             }
-            claimableAssets[onBehalf] = uint128(oldClaim + amt);
+            claimable.assets = uint128(oldClaim + amt);
             delete pendingWithdrawal[onBehalf];
             emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
             unchecked {
@@ -638,15 +649,15 @@ contract Vault is IVault, AccessManaged {
             newReserved += amt;
 
             // Merge the fee snapshot into the claimable balance.
-            uint256 oldClaim = claimableAssets[onBehalf];
-            uint64 oldFee = claimableFee[onBehalf];
+            ClaimableWithdrawal storage claimable = _claimableWithdrawal[onBehalf];
+            uint256 oldClaim = claimable.assets;
+            uint64 oldFee = claimable.fee;
             if (oldClaim == 0) {
-                claimableFee[onBehalf] = p.feeAtRequest;
+                claimable.fee = p.feeAtRequest;
             } else if (oldFee != p.feeAtRequest) {
-                claimableFee[onBehalf] =
-                    uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
+                claimable.fee = uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
             }
-            claimableAssets[onBehalf] = uint128(oldClaim + amt);
+            claimable.assets = uint128(oldClaim + amt);
 
             // Reduce the remaining queued balance.
             uint256 newAssets = uint256(p.assets) - amt;
@@ -672,14 +683,14 @@ contract Vault is IVault, AccessManaged {
     /// @notice Settles a fulfilled withdrawal for `onBehalf`.
     /// @dev Uses the fee snapshot stored when the request was queued and fulfilled.
     function claim(address onBehalf) external returns (uint256) {
-        uint256 assetsOut = claimableAssets[onBehalf];
+        ClaimableWithdrawal memory claimable = _claimableWithdrawal[onBehalf];
+        uint256 assetsOut = claimable.assets;
         require(assetsOut > 0, ErrorsLib.RequestNotPending());
         require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
 
         // Use the stored fee snapshot rather than the current withdrawal fee.
-        uint256 lockedFee = claimableFee[onBehalf];
-        claimableAssets[onBehalf] = 0;
-        delete claimableFee[onBehalf];
+        uint256 lockedFee = claimable.fee;
+        delete _claimableWithdrawal[onBehalf];
         reservedAssets -= assetsOut;
         pendingClaimableAssets -= assetsOut;
 
@@ -697,7 +708,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @notice Returns whether `onBehalf` has claimable assets.
     function isClaimable(address onBehalf) external view returns (bool) {
-        return claimableAssets[onBehalf] > 0;
+        return _claimableWithdrawal[onBehalf].assets > 0;
     }
 
     /// @notice Returns aggregate liquidity available for withdrawals.

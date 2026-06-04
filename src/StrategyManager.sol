@@ -38,8 +38,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     mapping(address strategy => uint256 indexPlusOne) internal _strategyIndexPlusOne;
     mapping(address strategy => StrategyConfig) public strategyConfig;
 
-    mapping(address strategy => uint256) public forceDeallocatePenalty;
-
     mapping(bytes32 id => Caps) internal caps;
 
     modifier onlyVault() {
@@ -182,7 +180,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
         delete _strategyIndexPlusOne[strategy];
         delete strategyConfig[strategy];
-        delete forceDeallocatePenalty[strategy];
 
         emit EventsLib.RemoveStrategy(strategy);
     }
@@ -259,8 +256,12 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         require(isStrategy(strategy), ErrorsLib.NotStrategy());
         require(newForceDeallocatePenalty <= MAX_FORCE_DEALLOCATE_PENALTY, ErrorsLib.PenaltyTooHigh());
 
-        forceDeallocatePenalty[strategy] = newForceDeallocatePenalty;
+        strategyConfig[strategy].forceDeallocatePenalty = uint64(newForceDeallocatePenalty);
         emit EventsLib.SetForceDeallocatePenalty(strategy, newForceDeallocatePenalty);
+    }
+
+    function forceDeallocatePenalty(address strategy) external view returns (uint256) {
+        return strategyConfig[strategy].forceDeallocatePenalty;
     }
 
     /* VAULT HOOKS */
@@ -424,7 +425,12 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             _strategyIndexPlusOne[strategy] = _strategies.length;
 
             strategyConfig[strategy] = StrategyConfig({
-                exists: true, active: true, capBps: uint16(capBps), targetBps: uint16(targetBps), kind: kind
+                exists: true,
+                active: true,
+                capBps: uint16(capBps),
+                targetBps: uint16(targetBps),
+                kind: kind,
+                forceDeallocatePenalty: 0
             });
 
             emit EventsLib.AddStrategy(strategy);
@@ -436,7 +442,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     function _availableLiquidityOf(address strategy) internal view returns (uint256 liquidity) {
         bytes4 selector = bytes4(keccak256("availableLiquidity()"));
-
         (bool success, bytes memory data) = strategy.staticcall(abi.encodeWithSelector(selector));
         if (success && data.length >= 32) {
             liquidity = abi.decode(data, (uint256));

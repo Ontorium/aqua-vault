@@ -11,6 +11,7 @@ interface IStrategyManager {
         uint16 capBps;
         uint16 targetBps;
         uint8 kind; // 0 = onchain, 1 = offchain reported, custom values are allowed.
+        uint64 forceDeallocatePenalty;
     }
 
     struct StrategyInfo {
