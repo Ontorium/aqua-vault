@@ -60,6 +60,8 @@ contract AquaStrategy is IStrategy, AccessManaged {
         adapterId = keccak256(abi.encode("AquaStrategy", address(this)));
 
         SafeERC20Lib.safeApprove(_asset, _lendingPool, type(uint256).max);
+        // Vault pulls deallocated funds via transferFrom(strategy, vault, amt).
+        SafeERC20Lib.safeApprove(_asset, _vault, type(uint256).max);
     }
 
     /* GOVERNANCE FUNCTIONS */

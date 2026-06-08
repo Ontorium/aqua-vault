@@ -73,6 +73,8 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         adapterId = keccak256(abi.encode("MorphoStrategy", address(this)));
 
         SafeERC20Lib.safeApprove(_asset, _morpho, type(uint256).max);
+        // Vault pulls deallocated funds via transferFrom(strategy, vault, amt).
+        SafeERC20Lib.safeApprove(_asset, _vault, type(uint256).max);
     }
 
     /* GETTERS */

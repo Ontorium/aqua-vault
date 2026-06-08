@@ -100,15 +100,23 @@ contract AquaForkTest is Test {
             return;
         }
 
+        // The live SM may already have other registered strategies (e.g. an existing AquaStrategy
+        // from prior deployments, an OffchainNAVStrategy). Capture baselines so we assert on the
+        // DELTA introduced by this test rather than absolute totals.
+        uint256 smBaseline = sm.totalStrategyAssets();
+        uint256 adapterBaseline = sm.allocation(_adapterId());
+        uint256 aTokenBaseline = sm.allocation(_aTokenId());
+
         _depositAndAllocate();
 
-        // The strategy now holds acUSDT (aTokens) ~= the supplied principal (allow 1 wei rebase rounding).
+        // The fresh strategy itself should hold aTokens equal to the supplied principal.
         assertApproxEqAbs(IERC20(ATOKEN).balanceOf(address(strategy)), AMOUNT, 1, "strategy holds aTokens");
         assertApproxEqAbs(strategy.totalAssets(), AMOUNT, 1, "totalAssets == aToken balance");
-        // StrategyManager aggregates the position under both caps.
-        assertApproxEqAbs(sm.totalStrategyAssets(), AMOUNT, 1, "SM aggregates aToken value");
-        assertApproxEqAbs(sm.allocation(_adapterId()), AMOUNT, 1, "adapter cap allocation");
-        assertApproxEqAbs(sm.allocation(_aTokenId()), AMOUNT, 1, "aToken cap allocation");
+        // StrategyManager aggregates: the DELTA should equal AMOUNT (other strategies' balances
+        // could rebase by a few wei during the test, so allow a small slack).
+        assertApproxEqAbs(sm.totalStrategyAssets() - smBaseline, AMOUNT, 100, "SM aggregates delta");
+        assertApproxEqAbs(sm.allocation(_adapterId()) - adapterBaseline, AMOUNT, 1, "adapter cap delta");
+        assertApproxEqAbs(sm.allocation(_aTokenId()) - aTokenBaseline, AMOUNT, 100, "aToken cap delta");
 
         console.log("aToken (acUSDT) held by strategy:", IERC20(ATOKEN).balanceOf(address(strategy)));
         console.log("vault.totalAssets()             :", vault.totalAssets());
@@ -137,10 +145,6 @@ contract AquaForkTest is Test {
 
     /* ── full round-trip: deallocate back out of the live pool ────────────────── */
 
-    /// @dev NOTE: AquaStrategy never approves the vault, so the vault's deallocate pullback
-    /// (`safeTransferFrom(asset, strategy, vault, ...)`) cannot pull funds back as-is. We prank the
-    /// strategy to grant that allowance here so the round-trip exercises the real pool withdraw.
-    /// This is a workaround for a missing approval in AquaStrategy — see the chat note.
     function testForkDeallocateWithdrawsFromAqua() public {
         if (skipped) {
             vm.skip(true);
@@ -148,10 +152,6 @@ contract AquaForkTest is Test {
         }
 
         _depositAndAllocate();
-
-        // Workaround for the missing strategy->vault approval (OffchainNAVStrategy does this internally).
-        vm.prank(address(strategy));
-        IERC20(ASSET).approve(VAULT, type(uint256).max);
 
         uint256 vaultBalBefore = IERC20(ASSET).balanceOf(VAULT);
 
