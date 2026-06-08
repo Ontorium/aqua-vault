@@ -11,78 +11,167 @@ import {RoleManager} from "../src/RoleManager.sol";
 import {Timelock} from "../src/Timelock.sol";
 import {EnvSigner} from "./EnvSigner.sol";
 
-/// @notice Core deployment: a `VaultFactory` (which deploys the Vault + RoleManager), then the
-/// StrategyManager + Timelock, wired up to mirror the original atomic factory.
+/// @notice Multi-vault governance topology: ONE shared RoleManager + ONE shared Timelock govern MANY
+/// vaults. Roles are namespaced per scope inside the single RoleManager — each vault's GOVERNANCE/CURATOR/
+/// SENTINEL/ALLOCATOR live under `getScopedRole(vault, ...)`, so operational roles stay isolated per vault even
+/// though there is only one RoleManager. The shared Timelock governs a vault by holding `scoped(vault,
+/// GOVERNANCE)` (Timelock.execute does target.call, and vault governance functions check the scoped role);
+/// the Timelock's own crew (configure targets / schedule / revoke) lives under `scoped(timelock, ...)`.
 ///
-/// Environment variables (signer):
-///   PRIVATE_KEY        (optional) raw key for broadcasting; OR
-///   MNEMONIC           (optional) seed phrase; uses MNEMONIC_INDEX (default 0).
-///   If neither is set, falls back to the CLI signer (--private-key/--mnemonic/--account).
-/// Other environment variables:
-///   OWNER              (optional) DEFAULT_ADMIN_ROLE holder. Defaults to the signer. Must equal the
-///                      signer for the wiring grants below to succeed.
-///   ASSET              (optional) underlying ERC20. If unset, deploys a mintable MockToken (testnets only).
-///   SALT               (optional) CREATE2 salt for the Vault address. Defaults to 0.
-///   FACTORY            (optional) reuse an already-deployed VaultFactory instead of deploying a new one.
+/// Signer comes from the environment (PRIVATE_KEY or MNEMONIC + optional MNEMONIC_INDEX; see EnvSigner),
+/// or the CLI signer (--private-key/--mnemonic/--account) if neither is set. OWNER (optional env) is the
+/// admin / governance-crew holder, defaulting to the signer; it MUST equal the signer for the grants to
+/// succeed. In production, hand OWNER's roles to a multisig.
 ///
-/// Usage:
-///   forge script script/Deploy.s.sol:Deploy --rpc-url $RPC --broadcast --verify
+/// Two-phase usage (run governance ONCE, then a vault per asset):
+///   # 1) governance singletons (record the two printed addresses)
+///   forge script script/Deploy.s.sol:Deploy --sig "deployGovernance()" --rpc-url $RPC --broadcast
+///   # 2) a vault wired to the shared timelock (timelock, factory, asset, salt, symbol, name)
+///   forge script script/Deploy.s.sol:Deploy \
+///     --sig "deployVault(address,address,address,bytes32,string,string)" \
+///     <TIMELOCK> 0x0 0x0 0x0 "aquavUSDT" "Aqua Vault USDT" --rpc-url $RPC --broadcast
+/// Or `run(...)` to bootstrap governance + the first vault in one command.
 contract Deploy is EnvSigner {
-    function run()
+    /// @dev OWNER env (empty -> deployer) is the governance-crew / admin holder.
+    function _owner(address deployer) internal view returns (address) {
+        string memory ownerEnv = vm.envOr("OWNER", string(""));
+        return bytes(ownerEnv).length == 0 ? deployer : vm.parseAddress(ownerEnv);
+    }
+
+    /* ── ENTRYPOINTS ──────────────────────────────────────────────────────────── */
+
+    /// @notice Deploy the shared governance singletons ONCE: a dedicated governance RoleManager and the
+    /// shared Timelock bound to it. `owner` becomes the crew that drives the Timelock (GOVERNANCE to
+    /// configure targets, CURATOR to schedule, SENTINEL to revoke).
+    function deployGovernance() external returns (address govRoleManager, address timelock) {
+        address owner = _owner(_startBroadcastFromEnv());
+        (govRoleManager, timelock) = _deployGovernance(owner);
+        vm.stopBroadcast();
+
+        console.log("== Aqua governance ==");
+        console.log("owner (gov crew):", owner);
+        console.log("govRoleManager  :", govRoleManager);
+        console.log("Timelock        :", timelock);
+    }
+
+    /// @notice Deploy one vault wired to an existing shared `timelock`. `factory`/`asset` of 0 deploy a
+    /// fresh one (asset 0 -> mintable MockToken, testnet only). The signer must hold GOVERNANCE on the
+    /// timelock's governance RoleManager (granted by {deployGovernance}) to register the new targets.
+    function deployVault(
+        address timelock,
+        address factory,
+        address asset,
+        bytes32 salt,
+        string memory symbol,
+        string memory name
+    ) external returns (address vaultFactory, address vault, address strategyManager, address roleManager) {
+        address owner = _owner(_startBroadcastFromEnv());
+        (vaultFactory, vault, strategyManager, roleManager) =
+            _deployVault(Timelock(timelock), owner, factory, asset, salt, symbol, name);
+        vm.stopBroadcast();
+        _logVault(owner, asset, vaultFactory, vault, strategyManager, roleManager, timelock);
+    }
+
+    /// @notice Convenience: bootstrap governance + the first vault in one transaction batch.
+    function run(address asset, bytes32 salt, address factory, string memory symbol, string memory name)
         external
         returns (
-            address factory,
+            address vaultFactory,
             address vault,
             address strategyManager,
             address roleManager,
             address timelock
         )
     {
-        bytes32 salt = bytes32(vm.envOr("SALT", uint256(0)));
-        address existingFactory = vm.envOr("FACTORY", address(0));
-
-        // Signer from PRIVATE_KEY / MNEMONIC (see EnvSigner), or the CLI signer if neither is set.
-        address deployer = _startBroadcastFromEnv();
-        address owner = vm.envOr("OWNER", deployer);
-
-        // 1. Underlying asset: use ASSET if provided, otherwise deploy a mock (testnet convenience).
-        address asset = vm.envOr("ASSET", address(0));
-        if (asset == address(0)) {
-            asset = address(new MockToken("Mock USD", "mUSD", 6));
-            console.log("WARNING: ASSET unset, deployed MockToken (testnet only):", asset);
-        }
-
-        // 2. Factory: reuse or deploy.
-        VaultFactory f = existingFactory == address(0) ? new VaultFactory() : VaultFactory(existingFactory);
-        factory = address(f);
-
-        // 3. Factory deploys the Vault + its RoleManager (owner = DEFAULT_ADMIN_ROLE). The factory can
-        //    no longer fit StrategyManager + Timelock under the EIP-170 24KB code-size limit, so we
-        //    deploy and wire them here. The broadcaster must equal `owner` for the wiring grants below.
-        (vault, roleManager) = f.createVault(owner, asset, salt);
-
-        strategyManager = address(new StrategyManager(vault, asset, roleManager));
-        timelock = address(new Timelock(roleManager));
-
-        // 4. Wiring (was VaultFactory.createVault's job). owner holds DEFAULT_ADMIN_ROLE.
-        RoleManager rm = RoleManager(roleManager);
-        bytes32 GOVERNANCE_ROLE = rm.GOVERNANCE_ROLE();
-        rm.grantRole(GOVERNANCE_ROLE, owner); // transient: lets owner set the StrategyManager
-        Vault(vault).setStrategyManager(strategyManager);
-        rm.grantRole(GOVERNANCE_ROLE, timelock); // Timelock becomes the standing governor
-        rm.revokeRole(GOVERNANCE_ROLE, owner); // drop the transient grant (Timelock is sole governance)
-
+        address owner = _owner(_startBroadcastFromEnv());
+        address govRoleManager;
+        (govRoleManager, timelock) = _deployGovernance(owner);
+        (vaultFactory, vault, strategyManager, roleManager) =
+            _deployVault(Timelock(timelock), owner, factory, asset, salt, symbol, name);
         vm.stopBroadcast();
 
+        console.log("govRoleManager :", govRoleManager);
+        _logVault(owner, asset, vaultFactory, vault, strategyManager, roleManager, timelock);
+    }
+
+    /* ── INTERNAL (no broadcast management) ───────────────────────────────────── */
+
+    function _deployGovernance(address owner) internal returns (address govRoleManager, address timelock) {
+        RoleManager rm = new RoleManager(owner); // owner = DEFAULT_ADMIN_ROLE (the single shared RoleManager)
+        Timelock tl = new Timelock(address(rm));
+
+        // The Timelock is its own role scope. Wire its GOVERNANCE→CURATOR/SENTINEL hierarchy, then give
+        // `owner` the crew roles so it can drive the Timelock (configure targets / schedule / revoke).
+        // owner is DEFAULT_ADMIN, so it can grant itself the scoped GOVERNANCE, which then admins CURATOR/SENTINEL.
+        rm.registerScope(address(tl));
+        rm.grantRole(rm.getScopedRole(address(tl), "GOVERNANCE_ROLE"), owner);
+        rm.grantRole(rm.getScopedRole(address(tl), "CURATOR_ROLE"), owner);
+        rm.grantRole(rm.getScopedRole(address(tl), "SENTINEL_ROLE"), owner);
+
+        govRoleManager = address(rm);
+        timelock = address(tl);
+    }
+
+    function _deployVault(
+        Timelock timelock,
+        address owner,
+        address factory,
+        address asset,
+        bytes32 salt,
+        string memory symbol,
+        string memory name
+    ) internal returns (address vaultFactory, address vault, address strategyManager, address roleManager) {
+        // Underlying: provided token, else a mock (testnet convenience).
+        if (asset == address(0)) {
+            asset = address(new MockToken("Mock USD", "mUSD", 6));
+            console.log("WARNING: asset is zero, deployed MockToken (testnet only):", asset);
+        }
+
+        // The single shared RoleManager backing this deployment (the Timelock points to it).
+        RoleManager rm = RoleManager(address(timelock.roleManager()));
+        VaultFactory f = factory == address(0) ? new VaultFactory() : VaultFactory(factory);
+        vaultFactory = address(f);
+
+        // Factory deploys the Vault against the shared RoleManager and registers the vault's role scope.
+        roleManager = address(rm);
+        vault = f.createVault(roleManager, owner, asset, salt);
+        strategyManager = address(new StrategyManager(vault, asset, roleManager));
+
+        // Wire the vault: owner (DEFAULT_ADMIN) transiently takes the vault-scoped GOVERNANCE to do the setup,
+        // then hands it to the SHARED Timelock (the standing governor for this vault).
+        bytes32 governanceRole = rm.getScopedRole(vault, "GOVERNANCE_ROLE");
+        rm.grantRole(governanceRole, owner);
+        Vault(vault).setStrategyManager(strategyManager);
+        if (bytes(name).length != 0) Vault(vault).setName(name);
+        if (bytes(symbol).length != 0) Vault(vault).setSymbol(symbol);
+        rm.grantRole(governanceRole, address(timelock));
+        rm.revokeRole(governanceRole, owner);
+
+        // Register the new contracts as governance targets on the shared Timelock so it can govern them.
+        // Requires the signer to hold GOVERNANCE on the Timelock's governance RoleManager.
+        timelock.setIsTarget(vault, true);
+        timelock.setIsTarget(strategyManager, true);
+    }
+
+    function _logVault(
+        address owner,
+        address asset,
+        address vaultFactory,
+        address vault,
+        address strategyManager,
+        address roleManager,
+        address timelock
+    ) internal view {
         console.log("== Aqua Vault deployment ==");
-        console.log("deployer       :", deployer);
         console.log("owner (admin)  :", owner);
         console.log("asset          :", asset);
-        console.log("VaultFactory   :", factory);
+        console.log("share name     :", Vault(vault).name());
+        console.log("share symbol   :", Vault(vault).symbol());
+        console.log("VaultFactory   :", vaultFactory);
         console.log("Vault          :", vault);
         console.log("StrategyManager:", strategyManager);
         console.log("RoleManager    :", roleManager);
-        console.log("Timelock       :", timelock);
+        console.log("Timelock(shared):", timelock);
     }
 }
 
