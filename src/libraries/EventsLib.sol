@@ -91,6 +91,8 @@ library EventsLib {
     event SetMaxRate(uint256 newMaxRate);
     event SetForceDeallocatePenalty(address indexed strategy, uint256 forceDeallocatePenalty);
     event SyncReportedNAV(address indexed priceManager, uint256 previousTotalAssets, uint256 newTotalAssets);
+    event LiquidityProvided(address indexed lender, uint256 amount);
+    event LiquidityRemoved(address indexed lender, uint256 amount);
 
     // StrategyManager-related events
     event SetStrategyManager(address indexed newStrategyManager);

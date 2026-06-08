@@ -13,7 +13,16 @@ fs_permissions = [
     { access = "read-write", path = "./reports" },
     { access = "read", path = "./broadcast" },
 ]
+# Default `forge test` skips fork-mode integration tests — they depend on live testnet state and
+# can break when accumulated balances drift. Run them explicitly via:
+#   forge test --match-path "test/fork/**"
+#   FOUNDRY_PROFILE=fork forge test
+no_match_path = "test/fork/**"
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# Run fork tests explicitly with: FOUNDRY_PROFILE=fork forge test
+[profile.fork]
+match_path = "test/fork/**"
 
 [rpc_endpoints]
 arbitrum_sepolia = "${ARBITRUM_SEPOLIA_RPC_URL}"

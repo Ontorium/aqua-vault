@@ -57,6 +57,10 @@ interface IVault is IERC4626, IERC2612 {
     function claimableFee(address onBehalf) external view returns (uint64);
     function reservedAssets() external view returns (uint256);
     function pendingClaimableAssets() external view returns (uint256);
+    function liquidity(address lender) external view returns (uint256);
+    function totalLiquidity() external view returns (uint256);
+    function provideLiquidity(uint256 amount) external;
+    function removeLiquidity(uint256 amount) external returns (uint256);
     function paused() external view returns (bool);
 
     // @dev Strategy registry, caps, allocation, per-strategy/per-id queries and aggregate liquidity views

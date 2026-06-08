@@ -87,6 +87,14 @@ contract Vault is IVault, AccessManaged {
     /// @dev Total assets owed to queued or fulfilled withdrawals.
     uint256 public pendingClaimableAssets;
 
+    /* LP LIQUIDITY (no-share liquidity provision) */
+
+    /// @dev Per-LP provided liquidity. NOT backed by shares — LPs get their principal back, never yield.
+    /// Use case: temporarily fund pending withdrawals without touching strategies / waiting on yield.
+    mapping(address lender => uint256) public liquidity;
+    /// @dev Sum of all provided liquidity. Excluded from `realAssets` so it doesn't inflate sharePrice.
+    uint256 public totalLiquidity;
+
     /* PAUSE STORAGE */
 
     /// @dev When true, deposits and allocations are paused.
@@ -298,8 +306,12 @@ contract Vault is IVault, AccessManaged {
 
         accrueInterest();
 
-        // Do not allocate assets reserved for fulfilled withdrawals.
-        require(assets <= IERC20(asset).balanceOf(address(this)) - reservedAssets, ErrorsLib.InsufficientLiquidity());
+        // Do not allocate assets reserved for fulfilled withdrawals OR LP exit liquidity.
+        // Exit liquidity must stay idle so LPs can always repay() against it.
+        require(
+            assets <= IERC20(asset).balanceOf(address(this)).zeroFloorSub(reservedAssets).zeroFloorSub(totalLiquidity),
+            ErrorsLib.InsufficientLiquidity()
+        );
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).allocate(data, assets, msg.sig, msg.sender);
@@ -338,6 +350,39 @@ contract Vault is IVault, AccessManaged {
         // forge-lint: disable-next-item(unsafe-typecast) safe because newMaxRate <= MAX_MAX_RATE < 2**64-1.
         maxRate = uint64(newMaxRate);
         emit EventsLib.SetMaxRate(newMaxRate);
+    }
+
+    /* EXIT LIQUIDITY (LP loans) */
+
+    /// @notice Provide temporary exit liquidity. The LP transfers `amount` of underlying to the
+    /// vault and gets a loan record (no shares). The funds are held in idle and used to fulfill
+    /// pending withdrawals. The LP can later repay via `removeLiquidity` to recover principal.
+    /// @dev Does NOT issue shares — LP has no yield exposure, no dilution risk to share holders.
+    function provideLiquidity(uint256 amount) external {
+        require(amount > 0, ErrorsLib.ZeroAddress());
+        SafeERC20Lib.safeTransferFrom(asset, msg.sender, address(this), amount);
+        liquidity[msg.sender] += amount;
+        totalLiquidity += amount;
+        emit EventsLib.LiquidityProvided(msg.sender, amount);
+    }
+
+    /// @notice Repay outstanding exit liquidity to the caller. Pulls from vault idle (excluding
+    /// share-holder reservations). May only repay up to the LP's loaned amount. Reverts if idle
+    /// is insufficient; LP must wait for the next deallocate or deposit to refill the buffer.
+    function removeLiquidity(uint256 amount) external returns (uint256 paid) {
+        uint256 loaned = liquidity[msg.sender];
+        if (amount > loaned) amount = loaned;
+        require(amount > 0, ErrorsLib.ZeroAddress());
+
+        // Available idle = balance - shareholder reservations. LP can claim back from this pool.
+        uint256 idle = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
+        require(idle >= amount, ErrorsLib.InsufficientLiquidity());
+
+        liquidity[msg.sender] = loaned - amount;
+        totalLiquidity -= amount;
+        SafeERC20Lib.safeTransfer(asset, msg.sender, amount);
+        emit EventsLib.LiquidityRemoved(msg.sender, amount);
+        return amount;
     }
 
     /* EXCHANGE RATE FUNCTIONS */
@@ -405,7 +450,10 @@ contract Vault is IVault, AccessManaged {
     }
 
     function _realAssets() internal view returns (uint256 realAssets) {
-        realAssets = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
+        // Subtract pending claims AND outstanding LP loans — neither belongs to share holders.
+        realAssets = IERC20(asset).balanceOf(address(this))
+            .zeroFloorSub(pendingClaimableAssets)
+            .zeroFloorSub(totalLiquidity);
         if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
     }
 
