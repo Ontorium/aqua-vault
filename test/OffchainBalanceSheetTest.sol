@@ -93,6 +93,48 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.deployToCustodian(1);
     }
 
+    /// @notice End-to-end: an offchain NAV gain reported by the custodian raises the vault share price.
+    /// Capital is allocated, deployed to the custodian and confirmed at cost; a later report of a higher NAV
+    /// flows reportedAssets → strategy totalAssets → vault totalAssets → per-share value (capped by maxRate).
+    /// forge-config: default.isolate = true
+    function testOffchainNAVGainRaisesSharePrice() public {
+        // Let the share price track real NAV growth.
+        vm.prank(governance);
+        vault.setMaxRate(MAX_MAX_RATE);
+
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        uint256 shares = vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        // Allocate to the offchain strategy, deploy to the custodian, and confirm NAV at cost.
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(deposit);
+        vm.prank(reporter);
+        strategy.report(deposit, 0, keccak256("confirm"), "ipfs://confirm");
+
+        // Baseline: one share ~ 1 underlying.
+        uint256 assetsPerShareBefore = vault.convertToAssets(shares);
+        assertApproxEqAbs(assetsPerShareBefore, deposit, 1, "baseline ~1:1");
+
+        // A year later the custodian reports a 10% NAV gain.
+        skip(365 days);
+        vm.prank(reporter);
+        strategy.report(deposit + 100e18, 0, keccak256("gain"), "ipfs://gain");
+        vault.accrueInterest();
+
+        // Share price rose with the reported NAV.
+        uint256 assetsPerShareAfter = vault.convertToAssets(shares);
+        assertGt(assetsPerShareAfter, assetsPerShareBefore, "share price increased");
+        assertApproxEqAbs(assetsPerShareAfter, deposit + 100e18, 2, "NAV gain reflected in share value");
+        assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault totalAssets grew by NAV gain");
+    }
+
     function testReportUpdatesNAVAndStaleness(uint256 navBefore, uint256 navAfter) public {
         navBefore = bound(navBefore, 0, type(uint96).max);
         navAfter = bound(navAfter, 0, type(uint96).max);

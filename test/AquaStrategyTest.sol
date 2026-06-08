@@ -233,6 +233,49 @@ contract AquaStrategyTest is BaseTest {
         assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault sees Aave interest");
     }
 
+    /// @notice End-to-end: aToken interest accrued in Aave lifts the vault share price, so existing share
+    /// holders can redeem MORE underlying than they deposited. Confirms interest flows aToken → strategy
+    /// totalAssets → vault totalAssets → per-share value (capped by maxRate).
+    /// forge-config: default.isolate = true
+    function testATokenInterestRaisesVaultSharePrice() public {
+        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
+        vm.startPrank(governance);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0, 0);
+        strategyManager.increaseAbsoluteCap(adapterIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(adapterIdData, WAD);
+        strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(aTokenIdData, WAD);
+        vault.setMaxRate(MAX_MAX_RATE); // allow the share price to grow with real yield
+        vm.stopPrank();
+
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        uint256 shares = vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+
+        // Baseline: one share is worth ~1 underlying right after deposit.
+        uint256 assetsPerShareBefore = vault.convertToAssets(shares);
+        assertApproxEqAbs(assetsPerShareBefore, deposit, 1, "baseline ~1:1");
+
+        // Aave pays 10% interest over a year; the rebasing aToken grows the strategy's balance.
+        aToken.accrue(address(strategy), 100e18);
+        skip(365 days);
+        vault.accrueInterest();
+
+        // Share price rose: the same shares now redeem ~1100 underlying.
+        uint256 assetsPerShareAfter = vault.convertToAssets(shares);
+        assertGt(assetsPerShareAfter, assetsPerShareBefore, "share price increased");
+        assertApproxEqAbs(assetsPerShareAfter, deposit + 100e18, 2, "interest reflected in share value");
+        assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault totalAssets grew by interest");
+    }
+
     /* ── writeOff (phantom asset NAV reduction) ───────────────────────────────── */
 
     /// @notice writeOff(amount) subtracts from totalAssets() and is monotonic — multiple calls

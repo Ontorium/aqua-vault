@@ -537,6 +537,65 @@ contract WithdrawalQueueTest is BaseTest {
         assertEq(underlyingToken.balanceOf(alice), 700e18, "received accumulated");
     }
 
+    /// @notice Three users queue different amounts. After the operator fulfills all of them, each user can
+    /// claim ONLY the assets reserved for their own request — not more, not another user's reservation.
+    /// Verifies per-user accounting isolation across many simultaneous pending entries.
+    function testMultiplePendingUsersClaimOnlyOwnAllocation() public {
+        address bob = makeAddr("bob");
+        address carol = makeAddr("carol");
+
+        // Each deposits a distinct amount and the allocator drains all idle into the strategy so every
+        // withdraw is forced into the pending queue.
+        _seed(500e18, 500e18); // alice
+        for (uint256 i; i < 2; ++i) {
+            (address who, uint256 amt) = i == 0 ? (bob, 300e18) : (carol, 200e18);
+            underlyingToken.mint(who, amt);
+            vm.startPrank(who);
+            underlyingToken.approve(address(vault), amt);
+            vault.deposit(amt, who);
+            vm.stopPrank();
+            vm.prank(allocator);
+            vault.allocate(address(strategy), hex"", amt);
+        }
+
+        // Distinct withdraw requests: alice 250, bob 180, carol 150.
+        vm.prank(alice);
+        vault.withdraw(250e18, alice, alice);
+        vm.prank(bob);
+        vault.withdraw(180e18, bob, bob);
+        vm.prank(carol);
+        vault.withdraw(150e18, carol, carol);
+
+        // Bring back exactly enough idle and fulfill all three in one operator call.
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 250e18 + 180e18 + 150e18);
+        address[] memory users = new address[](3);
+        users[0] = alice;
+        users[1] = bob;
+        users[2] = carol;
+        vm.prank(allocator);
+        vault.fulfillWithdrawal(users);
+
+        // Each user's claimable reflects only their own request.
+        assertEq(uint256(vault.claimableAssets(alice)), 250e18, "alice reserved");
+        assertEq(uint256(vault.claimableAssets(bob)), 180e18, "bob reserved");
+        assertEq(uint256(vault.claimableAssets(carol)), 150e18, "carol reserved");
+        assertEq(vault.reservedAssets(), 580e18, "total reserved = sum of all three");
+
+        // Each claim pays out exactly that user's own allocation — no cross-contamination.
+        assertEq(vault.claim(alice), 250e18, "alice gets her own");
+        assertEq(underlyingToken.balanceOf(alice), 250e18);
+        assertEq(vault.claim(bob), 180e18, "bob gets his own");
+        assertEq(underlyingToken.balanceOf(bob), 180e18);
+        assertEq(vault.claim(carol), 150e18, "carol gets her own");
+        assertEq(underlyingToken.balanceOf(carol), 150e18);
+
+        // Nothing left reserved; nobody can double-claim.
+        assertEq(vault.reservedAssets(), 0, "all reservations released");
+        vm.expectRevert(ErrorsLib.RequestNotPending.selector);
+        vault.claim(alice);
+    }
+
     /// @notice Empty-array call is a no-op (length matches, loop runs 0 times). Useful as a
     /// permissioned heartbeat / scheduler default.
     function testPartialFulfillEmptyArraysIsNoop() public {
