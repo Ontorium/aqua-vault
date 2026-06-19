@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (c) 2025 Morpho Association
 // Copyright (c) 2026 Ontorium
+//
+// Modified by Ontorium in 2026.
 pragma solidity ^0.8.24;
 
 import {IERC20} from "../interfaces/IERC20.sol";
