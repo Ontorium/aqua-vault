@@ -129,11 +129,11 @@ contract BuildReport is Script {
             "withdraw(",
             "withdraw(", // withdraw_queued = 2nd withdraw() in broadcast log
             "redeem(",
-            "provideLiquidity(", // inject — was vault.deposit, now LP loan function
+            "__SKIP__", // no-share liquidity feature removed; row left blank
             "deallocate(", // claim's deallocate = 3rd deallocate() (aqua, offchain, then claim's)
             "fulfillWithdrawal(",
             "claim(",
-            "removeLiquidity(",
+            "__SKIP__", // no-share liquidity feature removed; row left blank
             "fulfillWithdrawal(", // multi_user batch = 2nd fulfillWithdrawal()
             "claim(", // multi_user claim(A) = 2nd claim()
             "claim(", // multi_user claim(B) = 3rd claim()

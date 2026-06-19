@@ -16,6 +16,7 @@ contract GatingTest is BaseTest {
     address assetsSender;
     address sharesSender;
     address assetsReceiver;
+    uint256 constant TEST_ASSETS = 1e18;
 
     function setUp() public override {
         super.setUp();
@@ -83,6 +84,7 @@ contract GatingTest is BaseTest {
         vm.prank(sharesSender);
         vault.redeem(0, assetsReceiver, sharesSender);
     }
+
 
     function testTransferRequiresSendShares() public {
         _setAllGates();

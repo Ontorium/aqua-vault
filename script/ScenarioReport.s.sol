@@ -179,9 +179,7 @@ contract ScenarioReport is EnvSigner, StdCheats {
         if (_enabled("withdraw_immediate"))       { _asUser();     _case_withdrawImmediate(); }
         if (_enabled("withdraw_queued"))          { _asUser();     _case_withdrawQueued(); }
         if (_enabled("redeem_with_yield"))        { _asUser();     _case_redeem(); }
-        if (_enabled("inject_liquidity_for_claim")) { _asDeployer(); _case_injectLiquidity(); }
         if (_enabled("claim_queued_withdrawal"))  { _asOperator(); _case_claim(); }
-        if (_enabled("repay_exit_liquidity"))     { _asDeployer(); _case_repayLiquidity(); }
         if (_enabled("multi_user_claim_isolation")) { _asDeployer(); _case_multiUserClaimIsolation(); }
         if (_enabled("pause_unpause"))            { _asOperator(); _case_pause(); }
 
@@ -534,69 +532,10 @@ contract ScenarioReport is EnvSigner, StdCheats {
         );
     }
 
-    /// @dev Deployer (account 0) acts as an emergency liquidity provider via the loan-style
-    /// `provideLiquidity` path: principal is parked in vault.idle without share issuance.
-    /// LP gets NO yield exposure, existing share holders are NOT diluted. After the queued
-    /// claim settles, the LP can `removeLiquidity` to recover their principal.
-    function _case_injectLiquidity() internal {
-        (uint128 pendingAssets,,) = vault.pendingWithdrawal(user);
-        if (pendingAssets == 0) return; // nothing queued
-
-        uint256 amt = uint256(pendingAssets);
-        if (asset.balanceOf(deployer) < amt) {
-            console.log("[skip] deployer underfunded for liquidity injection");
-            return;
-        }
-
-        Snap memory b = _snap();
-        asset.approve(address(vault), amt);
-        vault.provideLiquidity(amt);
-        _emit(
-            "inject_liquidity_for_claim",
-            unicode"User의 redeem이 큐에 들어간 상태에서 0번째 계정(deployer)이 `provideLiquidity`로 "
-            unicode"임시 유동성을 빌려준다. **share 발행 없음** — sharePrice/yield에 영향 없고, "
-            unicode"기존 share 보유자도 dilution 없음. 출금 정산 후 deployer는 `removeLiquidity`로 원금 회수.",
-            string.concat(
-                "vault.provideLiquidity(", vm.toString(amt), ") -- loan from account 0, no shares issued"
-            ),
-            b,
-            _snap()
-        );
-    }
-
-    /// @dev Deployer recovers their exit liquidity principal after the claim is settled. Pulls from
-    /// vault.idle (which now has free idle after the claim drained pendingClaimableAssets).
-    function _case_repayLiquidity() internal {
-        uint256 loaned = vault.liquidity(deployer);
-        if (loaned == 0) return;
-
-        uint256 idle = asset.balanceOf(address(vault));
-        if (idle < loaned) {
-            // Need to deallocate from strategy first to refill idle for repayment.
-            _asOperator();
-            uint256 missing = loaned - idle;
-            uint256 strategyHas = strategy.totalAssets();
-            uint256 toPull = missing > strategyHas ? strategyHas : missing;
-            if (toPull > 0) vault.deallocate(address(strategy), hex"", toPull);
-            _asDeployer();
-        }
-
-        Snap memory b = _snap();
-        uint256 paid = vault.removeLiquidity(loaned);
-        _emit(
-            "repay_exit_liquidity",
-            unicode"Deployer가 빌려준 임시 유동성을 원금 그대로 회수한다 (yield/이자 없음). "
-            unicode"Vault.idle이 부족하면 operator가 먼저 strategy에서 deallocate해 보충한 뒤 repay.",
-            string.concat("vault.removeLiquidity(", vm.toString(loaned), ") -> ", vm.toString(paid), " (principal)"),
-            b,
-            _snap()
-        );
-    }
-
     /// @dev Settles a queued withdrawal. Withdraw/redeem with insufficient idle drops the request
     /// into `pendingWithdrawal[user]`. We (a) ensure vault has enough idle by deallocating from
-    /// AquaStrategy if needed (skipped if `inject_liquidity_for_claim` already provided idle),
-    /// (b) run `fulfillWithdrawal` to move pending → claimable, then (c) `claim(user)` pays it out.
+    /// AquaStrategy if needed, (b) run `fulfillWithdrawal` to move pending → claimable, then
+    /// (c) `claim(user)` pays it out.
     /// Steps (a) and (b) need ALLOCATOR (operator); (c) is callable by anyone.
     function _case_claim() internal {
         (uint128 pendingAssets,,) = vault.pendingWithdrawal(user);
