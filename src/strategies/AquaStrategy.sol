@@ -123,10 +123,6 @@ contract AquaStrategy is IStrategy, AccessManaged {
 
     /* VIEWS */
 
-    function realAssets() external view returns (uint256) {
-        return totalAssets();
-    }
-
     function totalAssets() public view returns (uint256) {
         uint256 raw = IAaveV2AToken(aToken).balanceOf(address(this));
         uint256 wo = writtenOff;

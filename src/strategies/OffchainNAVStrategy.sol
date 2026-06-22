@@ -123,13 +123,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     /// @notice Returns the assets counted by the vault.
     /// @dev Falls back to onchain idle assets while reports are stale.
-    function realAssets() external view override returns (uint256) {
-        uint256 idle = IERC20(asset).balanceOf(address(this));
-        if (isStale()) return idle;
-
-        return idle + uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
-    }
-
     function totalAssets() external view override returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this));
         if (isStale()) return idle;

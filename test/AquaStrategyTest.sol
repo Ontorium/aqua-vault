@@ -128,7 +128,6 @@ contract AquaStrategyTest is BaseTest {
         aToken.accrue(address(strategy), interest);
 
         assertEq(strategy.totalAssets(), principal + interest, "interest reflected");
-        assertEq(strategy.realAssets(), principal + interest, "realAssets tracks aToken");
     }
 
     /* ── DEALLOCATE → underlying returned ─────────────────────────────────────── */
@@ -289,7 +288,6 @@ contract AquaStrategyTest is BaseTest {
 
         assertEq(strategy.writtenOff(), 300e18);
         assertEq(strategy.totalAssets(), 700e18, "writeOff applied");
-        assertEq(strategy.realAssets(), 700e18, "realAssets mirrors totalAssets");
     }
 
     function testWriteOffIsMonotonicallyAccumulating() public {

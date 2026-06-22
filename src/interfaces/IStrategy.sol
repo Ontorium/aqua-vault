@@ -17,8 +17,6 @@ interface IStrategy {
         returns (bytes32[] memory ids, int256 change);
 
     /// @dev Returns the current value of the investments of the strategy (in underlying asset).
-    function realAssets() external view returns (uint256 assets);
-
     function totalAssets() external view returns (uint256);
     function availableLiquidity() external view returns (uint256);
 }

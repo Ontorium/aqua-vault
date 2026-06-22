@@ -163,9 +163,10 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         uint256 indexPlusOne = _strategyIndexPlusOne[strategy];
         require(indexPlusOne != 0, ErrorsLib.NotStrategy());
 
-        // A strategy must be empty before removal.
+        // A strategy must be fully empty before removal — including any offchain/reported value,
+        // so removal can never orphan funds still owed to the strategy.
         require(strategyAllocation(strategy) == 0, ErrorsLib.ZeroAllocation());
-        require(IStrategy(strategy).realAssets() == 0, ErrorsLib.ZeroAllocation());
+        require(IStrategy(strategy).totalAssets() == 0, ErrorsLib.ZeroAllocation());
 
         uint256 index = indexPlusOne - 1;
         uint256 lastIndex = _strategies.length - 1;

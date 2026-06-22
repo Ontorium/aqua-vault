@@ -82,10 +82,6 @@ contract StrategyMock is IStrategy {
         return _currentTotalAssets();
     }
 
-    function realAssets() external view returns (uint256) {
-        return _currentTotalAssets();
-    }
-
     function availableLiquidity() external view returns (uint256) {
         return IERC20(asset).balanceOf(address(this));
     }

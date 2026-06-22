@@ -191,10 +191,6 @@ contract MorphoStrategy is IStrategy, AccessManaged {
 
     /* AGGREGATE VIEWS */
 
-    function realAssets() external view returns (uint256) {
-        return totalAssets();
-    }
-
     function totalAssets() public view returns (uint256 total) {
         uint256 len = _marketIds.length;
         for (uint256 i; i < len;) {
