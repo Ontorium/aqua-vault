@@ -158,4 +158,64 @@ contract AccrueInterestTest is BaseTest {
         // Outside the tx that just ran, transient is again 0.
         assertEq(vault.firstTotalAssets(), 0);
     }
+
+    /* forceSyncReportedNAV — governance-only immediate reflection that bypasses the maxRate cap */
+
+    /// @dev With no elapsed time the maxRate ceiling equals `_totalAssets`, so `accrueInterest` hides
+    /// the gain; `forceSyncReportedNAV` snaps `_totalAssets` to the full real value in one shot.
+    /// forge-config: default.isolate = true
+    function testForceSyncReportedNAVBypassesMaxRate(uint256 deposit, uint256 interest) public {
+        deposit = bound(deposit, 1, maxTestAssets);
+        interest = bound(interest, 1, maxTestAssets);
+
+        vault.deposit(deposit, address(this));
+        strategy.setInterest(interest); // realAssets = deposit + interest (no time elapsed)
+
+        // Capped path reflects nothing without elapsed time.
+        assertEq(vault.totalAssets(), deposit, "capped path hides the gain");
+
+        // Governance force-sync reflects the full real value, uncapped.
+        vm.prank(governance);
+        vault.forceSyncReportedNAV();
+        assertEq(vault._totalAssets(), deposit + interest, "force reflects uncapped");
+    }
+
+    /// @dev Losses are reflected immediately by either path; confirm force handles the down case too.
+    /// forge-config: default.isolate = true
+    function testForceSyncReportedNAVReflectsLoss(uint256 deposit, uint256 loss) public {
+        deposit = bound(deposit, 1, maxTestAssets);
+        loss = bound(loss, 1, deposit);
+
+        vault.deposit(deposit, address(this));
+        // Allocate so the strategy carries principal the loss can bite into.
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        strategy.setLoss(loss); // strategy.totalAssets = deposit - loss
+
+        vm.prank(governance);
+        vault.forceSyncReportedNAV();
+        assertEq(vault._totalAssets(), deposit - loss, "force reflects loss");
+    }
+
+    function testForceSyncReportedNAVRequiresGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vm.prank(rdm);
+        vault.forceSyncReportedNAV();
+    }
+
+    /// forge-config: default.isolate = true
+    function testForceSyncReportedNAVEmits(uint256 deposit, uint256 interest) public {
+        deposit = bound(deposit, 1, maxTestAssets);
+        interest = bound(interest, 1, maxTestAssets);
+
+        vault.deposit(deposit, address(this));
+        strategy.setInterest(interest);
+
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit EventsLib.ForceSyncReportedNAV(governance, deposit, deposit + interest);
+        vm.prank(governance);
+        vault.forceSyncReportedNAV();
+    }
 }
