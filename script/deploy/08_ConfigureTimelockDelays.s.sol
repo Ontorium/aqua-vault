@@ -36,30 +36,30 @@ contract ConfigureTimelockDelays is EnvSigner {
 
         // High-risk (fee / fee recipient / strategy manager link / maxRate)
         uint256 highRisk = isMainnet ? 14 days : 60;
-        timelock.setTimelock(vault, Vault.setWithdrawalFee.selector,        highRisk);
-        timelock.setTimelock(vault, Vault.setDepositFee.selector,           highRisk);
-        timelock.setTimelock(vault, Vault.setPerformanceFee.selector,       highRisk);
-        timelock.setTimelock(vault, Vault.setManagementFee.selector,        highRisk);
-        timelock.setTimelock(vault, Vault.setProtocolFeeRecipient.selector, highRisk);
-        timelock.setTimelock(vault, Vault.setPerformanceFeeRecipient.selector, highRisk);
-        timelock.setTimelock(vault, Vault.setManagementFeeRecipient.selector,  highRisk);
-        timelock.setTimelock(vault, Vault.setStrategyManager.selector,      highRisk);
-        timelock.setTimelock(vault, Vault.setMaxRate.selector,              highRisk);
+        timelock.increaseTimelock(vault, Vault.setWithdrawalFee.selector,        highRisk);
+        timelock.increaseTimelock(vault, Vault.setDepositFee.selector,           highRisk);
+        timelock.increaseTimelock(vault, Vault.setPerformanceFee.selector,       highRisk);
+        timelock.increaseTimelock(vault, Vault.setManagementFee.selector,        highRisk);
+        timelock.increaseTimelock(vault, Vault.setProtocolFeeRecipient.selector, highRisk);
+        timelock.increaseTimelock(vault, Vault.setPerformanceFeeRecipient.selector, highRisk);
+        timelock.increaseTimelock(vault, Vault.setManagementFeeRecipient.selector,  highRisk);
+        timelock.increaseTimelock(vault, Vault.setStrategyManager.selector,      highRisk);
+        timelock.increaseTimelock(vault, Vault.setMaxRate.selector,              highRisk);
 
         // Medium (strategy add/remove/cap)
         uint256 mediumRisk = isMainnet ? 7 days : 60;
-        timelock.setTimelock(sm, StrategyManager.addStrategy.selector,                mediumRisk);
-        timelock.setTimelock(sm, StrategyManager.removeStrategy.selector,             mediumRisk);
-        timelock.setTimelock(sm, StrategyManager.setStrategyActive.selector,          mediumRisk);
-        timelock.setTimelock(sm, StrategyManager.increaseAbsoluteCap.selector,        mediumRisk);
-        timelock.setTimelock(sm, StrategyManager.increaseRelativeCap.selector,        mediumRisk);
-        timelock.setTimelock(sm, StrategyManager.setForceDeallocatePenalty.selector,  mediumRisk);
+        timelock.increaseTimelock(sm, StrategyManager.addStrategy.selector,                mediumRisk);
+        timelock.increaseTimelock(sm, StrategyManager.removeStrategy.selector,             mediumRisk);
+        timelock.increaseTimelock(sm, StrategyManager.setStrategyActive.selector,          mediumRisk);
+        timelock.increaseTimelock(sm, StrategyManager.increaseAbsoluteCap.selector,        mediumRisk);
+        timelock.increaseTimelock(sm, StrategyManager.increaseRelativeCap.selector,        mediumRisk);
+        timelock.increaseTimelock(sm, StrategyManager.setForceDeallocatePenalty.selector,  mediumRisk);
 
         // Low (metadata)
         uint256 lowRisk = isMainnet ? 3 days : 0;
-        timelock.setTimelock(vault, Vault.setName.selector,   lowRisk);
-        timelock.setTimelock(vault, Vault.setSymbol.selector, lowRisk);
-        timelock.setTimelock(vault, Vault.unpause.selector,   lowRisk);
+        timelock.increaseTimelock(vault, Vault.setName.selector,   lowRisk);
+        timelock.increaseTimelock(vault, Vault.setSymbol.selector, lowRisk);
+        timelock.increaseTimelock(vault, Vault.unpause.selector,   lowRisk);
 
         vm.stopBroadcast();
 

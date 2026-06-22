@@ -22,7 +22,12 @@ contract Timelock is ITimelock, AccessManaged {
     /// @dev The Timelock is its own role scope: its governance crew (GOVERNANCE/CURATOR/SENTINEL who
     /// configure targets / schedule / revoke) are namespaced under the Timelock's own address. It governs
     /// a vault by separately holding that vault's `scoped(vault, GOVERNANCE)`.
-    constructor(address _roleManager) AccessManaged(_roleManager, address(this)) {}
+    constructor(address _roleManager) AccessManaged(_roleManager, address(this)) {
+        // Register self as a target so `decreaseTimelock` can be routed through schedule/execute and pick up
+        // the self-referential delay computed in `schedule`. Every other self-function is GOVERNANCE-gated,
+        // so `execute` (msg.sender == this, holding no roles) can only ever reach `decreaseTimelock`.
+        isTarget[address(this)] = true;
+    }
 
     function setIsTarget(address target, bool allowed) external onlyRole(GOVERNANCE_ROLE) {
         require(target != address(0), ErrorsLib.ZeroAddress());
@@ -32,8 +37,23 @@ contract Timelock is ITimelock, AccessManaged {
         emit EventsLib.SetGovernanceTarget(target, allowed);
     }
 
-    function setTimelock(address target, bytes4 selector, uint256 newDuration) external onlyRole(GOVERNANCE_ROLE) {
+    /// @notice Raise a (target, selector) delay. Immediate — strengthening protection is always safe.
+    /// @dev Equal `newDuration` is allowed (idempotent); lowering must go through the delayed path.
+    function increaseTimelock(address target, bytes4 selector, uint256 newDuration) external onlyRole(GOVERNANCE_ROLE) {
         require(isTarget[target], ErrorsLib.InvalidTarget());
+        require(newDuration >= timelock[target][selector], ErrorsLib.TimelockNotIncreasing());
+        timelock[target][selector] = newDuration;
+        emit EventsLib.SetTimelock(target, selector, newDuration);
+    }
+
+    /// @notice Reduce a (target, selector) delay. Reachable ONLY via `execute` (self-call), and `schedule`
+    /// delays it by the *current* timelock of the same (target, selector) — so a strong timelock can never
+    /// be weakened faster than itself. Anti-rug against a compromised key.
+    /// @dev Flow: curator `schedule(this, abi.encodeCall(decreaseTimelock, (target, selector, newDuration)))`
+    /// → wait the current delay → anyone `execute(this, sameData)`. Cancel with `revoke`.
+    function decreaseTimelock(address target, bytes4 selector, uint256 newDuration) external {
+        require(msg.sender == address(this), ErrorsLib.Unauthorized());
+        require(newDuration < timelock[target][selector], ErrorsLib.TimelockNotDecreasing());
         timelock[target][selector] = newDuration;
         emit EventsLib.SetTimelock(target, selector, newDuration);
     }
@@ -49,7 +69,15 @@ contract Timelock is ITimelock, AccessManaged {
         require(executableAt[target][data] == 0, ErrorsLib.DataAlreadyPending());
 
         bytes4 selector = bytes4(data);
-        executableAt[target][data] = block.timestamp + timelock[target][selector];
+        uint256 delay;
+        if (target == address(this) && selector == this.decreaseTimelock.selector) {
+            // Self-referential: reducing a (innerTarget, innerSelector) delay waits that delay's CURRENT value.
+            (address innerTarget, bytes4 innerSelector,) = abi.decode(data[4:], (address, bytes4, uint256));
+            delay = timelock[innerTarget][innerSelector];
+        } else {
+            delay = timelock[target][selector];
+        }
+        executableAt[target][data] = block.timestamp + delay;
         emit EventsLib.GovernanceSubmit(target, selector, data, executableAt[target][data]);
     }
 

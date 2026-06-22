@@ -11,7 +11,8 @@ interface ITimelock {
     function executableAt(address target, bytes memory data) external view returns (uint256);
 
     function setIsTarget(address target, bool allowed) external;
-    function setTimelock(address target, bytes4 selector, uint256 newDuration) external;
+    function increaseTimelock(address target, bytes4 selector, uint256 newDuration) external;
+    function decreaseTimelock(address target, bytes4 selector, uint256 newDuration) external;
     function setAbdicated(address target, bytes4 selector, bool newAbdicated) external;
 
     function schedule(address target, bytes memory data) external;

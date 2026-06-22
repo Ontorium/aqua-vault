@@ -69,7 +69,7 @@ contract TimelockTest is BaseTest {
 
         vm.startPrank(governance);
         timelock.setIsTarget(address(vault), true);
-        timelock.setTimelock(address(vault), Vault.setName.selector, delay);
+        timelock.increaseTimelock(address(vault), Vault.setName.selector, delay);
         vm.stopPrank();
 
         bytes memory data = abi.encodeCall(Vault.setName, ("aqua"));
@@ -163,5 +163,117 @@ contract TimelockTest is BaseTest {
         vm.expectRevert(ErrorsLib.Unauthorized.selector);
         vm.prank(rdm);
         timelock.schedule(address(vault), data);
+    }
+
+    /* ── ASYMMETRIC TIMELOCK CONFIG: increase immediate / decrease self-delayed ── */
+
+    /// @dev Raising a delay (strengthening protection) is immediate; equal is idempotent.
+    function testIncreaseTimelockImmediate(uint64 d1, uint64 d2) public {
+        d1 = uint64(bound(d1, 1, 365 days));
+        d2 = uint64(bound(d2, d1, 365 days)); // d2 >= d1
+        bytes4 sel = Vault.setName.selector;
+
+        vm.startPrank(governance);
+        timelock.setIsTarget(address(vault), true);
+        timelock.increaseTimelock(address(vault), sel, d1);
+        assertEq(timelock.timelock(address(vault), sel), d1);
+        timelock.increaseTimelock(address(vault), sel, d2); // raise again, still immediate
+        assertEq(timelock.timelock(address(vault), sel), d2);
+        vm.stopPrank();
+    }
+
+    /// @dev increaseTimelock cannot lower — that path is reserved for the delayed decrease.
+    function testIncreaseTimelockCannotLower() public {
+        bytes4 sel = Vault.setName.selector;
+        vm.startPrank(governance);
+        timelock.setIsTarget(address(vault), true);
+        timelock.increaseTimelock(address(vault), sel, 100);
+        vm.expectRevert(ErrorsLib.TimelockNotIncreasing.selector);
+        timelock.increaseTimelock(address(vault), sel, 99);
+        vm.stopPrank();
+    }
+
+    /// @dev decreaseTimelock is reachable only via execute (self-call); a direct call reverts.
+    function testDecreaseTimelockNotDirectlyCallable(address rdm) public {
+        vm.assume(rdm != address(timelock));
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vm.prank(rdm);
+        timelock.decreaseTimelock(address(vault), Vault.setName.selector, 0);
+    }
+
+    /// @dev CORE anti-rug: a decrease routed through schedule/execute is delayed by the *current* timelock of
+    /// the same (target, selector), so a strong timelock can never be weakened faster than itself.
+    function testDecreaseTimelockSelfDelayed() public {
+        bytes4 sel = Vault.setName.selector;
+        uint256 current = 7 days;
+
+        vm.startPrank(governance);
+        timelock.setIsTarget(address(vault), true);
+        timelock.increaseTimelock(address(vault), sel, current);
+        vm.stopPrank();
+
+        bytes memory data = abi.encodeCall(Timelock.decreaseTimelock, (address(vault), sel, 1 days));
+
+        // Curator schedules on the timelock itself; delay = current timelock of (vault, sel) = 7d.
+        vm.prank(curator);
+        timelock.schedule(address(timelock), data);
+        assertEq(timelock.executableAt(address(timelock), data), block.timestamp + current);
+
+        // Cannot execute before the self-delay; value stays unchanged.
+        vm.expectRevert(ErrorsLib.TimelockNotExpired.selector);
+        timelock.execute(address(timelock), data);
+        assertEq(timelock.timelock(address(vault), sel), current, "unchanged before delay");
+
+        skip(current);
+        timelock.execute(address(timelock), data);
+        assertEq(timelock.timelock(address(vault), sel), 1 days, "decreased only after self-delay");
+    }
+
+    /// @dev A decrease that isn't strictly lower reverts at execution.
+    function testDecreaseTimelockRequiresLower() public {
+        bytes4 sel = Vault.setName.selector;
+        vm.startPrank(governance);
+        timelock.setIsTarget(address(vault), true);
+        timelock.increaseTimelock(address(vault), sel, 100);
+        vm.stopPrank();
+
+        bytes memory data = abi.encodeCall(Timelock.decreaseTimelock, (address(vault), sel, 100));
+        vm.prank(curator);
+        timelock.schedule(address(timelock), data);
+        skip(100);
+        vm.expectRevert(ErrorsLib.TimelockNotDecreasing.selector);
+        timelock.execute(address(timelock), data);
+    }
+
+    /// @dev Sentinel cancels a pending decrease via the generic revoke; nothing to execute afterwards.
+    function testRevokeTimelockDecrease() public {
+        bytes4 sel = Vault.setName.selector;
+        vm.startPrank(governance);
+        timelock.setIsTarget(address(vault), true);
+        timelock.increaseTimelock(address(vault), sel, 7 days);
+        vm.stopPrank();
+
+        bytes memory data = abi.encodeCall(Timelock.decreaseTimelock, (address(vault), sel, 1 days));
+        vm.prank(curator);
+        timelock.schedule(address(timelock), data);
+
+        vm.prank(sentinel);
+        timelock.revoke(address(timelock), data);
+
+        skip(7 days);
+        vm.expectRevert(ErrorsLib.DataNotTimelocked.selector);
+        timelock.execute(address(timelock), data);
+        assertEq(timelock.timelock(address(vault), sel), 7 days, "decrease was cancelled");
+    }
+
+    /// @dev increaseTimelock requires Timelock-scoped GOVERNANCE.
+    function testIncreaseTimelockRequiresGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        vm.prank(governance);
+        timelock.setIsTarget(address(vault), true);
+
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vm.prank(rdm);
+        timelock.increaseTimelock(address(vault), Vault.setName.selector, 1);
     }
 }
