@@ -129,7 +129,7 @@ abstract contract BaseTest is Test {
 
     /// @dev Slot of the packed `_totalAssets|lastUpdate|maxRate` tuple. Confirmed via
     /// `forge inspect Vault storage-layout`; assertions below catch any layout drift.
-    bytes32 internal constant TOTAL_ASSETS_PACKED_SLOT = bytes32(uint256(12));
+    bytes32 internal constant TOTAL_ASSETS_PACKED_SLOT = bytes32(uint256(11));
 
     /// @dev Stamps `_totalAssets` directly to simulate post-interest state in exchange-rate tests.
     /// Bypasses maxRate clamping so tests can probe arbitrary share prices.

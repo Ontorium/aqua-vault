@@ -116,28 +116,6 @@ contract SettersTest is BaseTest {
         vault.setStrategyManager(address(replacement));
     }
 
-    /* PRICE MANAGER */
-
-    function testSetPriceManager(address rdm) public {
-        vm.assume(rdm != governance && rdm != address(timelock));
-
-        // Must point at a contract (NoCode check).
-        address newPriceManager = address(strategyManager); // any deployed contract works for this test
-        vm.expectRevert(ErrorsLib.Unauthorized.selector);
-        vm.prank(rdm);
-        vault.setPriceManager(newPriceManager);
-
-        vm.prank(governance);
-        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
-        vault.setPriceManager(address(0));
-
-        vm.prank(governance);
-        vm.expectEmit();
-        emit EventsLib.SetPriceManager(newPriceManager);
-        vault.setPriceManager(newPriceManager);
-        assertEq(vault.priceManager(), newPriceManager);
-    }
-
     /* FEES */
 
     function testSetPerformanceFeeRequiresRecipientFirst(uint256 fee) public {

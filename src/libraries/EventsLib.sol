@@ -68,7 +68,6 @@ library EventsLib {
     event SetSendSharesGate(address indexed newSendSharesGate);
     event SetReceiveAssetsGate(address indexed newReceiveAssetsGate);
     event SetSendAssetsGate(address indexed newSendAssetsGate);
-    event SetPriceManager(address indexed newPriceManager);
     event SetStrategyRegistry(address indexed newStrategyRegistry);
     event AddStrategy(address indexed account);
     event RemoveStrategy(address indexed account);
@@ -90,7 +89,7 @@ library EventsLib {
     event IncreaseRelativeCap(bytes32 indexed id, bytes idData, uint256 newRelativeCap);
     event SetMaxRate(uint256 newMaxRate);
     event SetForceDeallocatePenalty(address indexed strategy, uint256 forceDeallocatePenalty);
-    event SyncReportedNAV(address indexed priceManager, uint256 previousTotalAssets, uint256 newTotalAssets);
+    event ForceSyncReportedNAV(address indexed caller, uint256 previousTotalAssets, uint256 newTotalAssets);
 
     // StrategyManager-related events
     event SetStrategyManager(address indexed newStrategyManager);
@@ -123,14 +122,4 @@ library EventsLib {
     // (using per-strategy scoped role hashes), NOT here.
     event SetCustodian(address indexed custodian);
     event SetMaxChangeBps(uint256 maxChangeBps);
-
-    // PriceManager events
-    event PriceManagerUpdate(
-        address indexed vault,
-        address indexed offchainStrategy,
-        uint256 netAssetValue,
-        uint256 totalAssets,
-        uint256 totalSupply,
-        uint256 pricePerShare
-    );
 }

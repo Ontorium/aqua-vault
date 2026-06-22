@@ -35,12 +35,11 @@ contract GettersTest is BaseTest {
         assertEq(vault.lastUpdate(), block.timestamp);
         assertEq(vault.maxRate(), 0);
 
-        // No gates and no priceManager wired by default.
+        // No gates wired by default.
         assertEq(vault.receiveSharesGate(), address(0));
         assertEq(vault.sendSharesGate(), address(0));
         assertEq(vault.receiveAssetsGate(), address(0));
         assertEq(vault.sendAssetsGate(), address(0));
-        assertEq(vault.priceManager(), address(0));
 
         // Fees default to zero.
         assertEq(vault.performanceFee(), 0);

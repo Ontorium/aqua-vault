@@ -12,7 +12,7 @@ interface IOffchainNAVStrategy is IStrategy {
     function vault() external view returns (address);
     function asset() external view returns (address);
 
-    // Reporter-only NAV update used by PriceManager.
+    // Reporter-only NAV update (single NAV input path; reflected via accrueInterest, smoothed by maxRate).
     function report(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,

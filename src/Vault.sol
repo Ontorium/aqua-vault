@@ -41,7 +41,6 @@ contract Vault is IVault, AccessManaged {
     address public receiveAssetsGate;
     address public sendAssetsGate;
     address public strategyManager;
-    address public priceManager;
 
     /* TOKEN STORAGE */
 
@@ -194,13 +193,6 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.SetStrategyManager(newStrategyManager);
     }
 
-    function setPriceManager(address newPriceManager) external onlyRole(GOVERNANCE_ROLE) {
-        require(newPriceManager != address(0), ErrorsLib.ZeroAddress());
-        require(newPriceManager.code.length != 0, ErrorsLib.NoCode());
-        priceManager = newPriceManager;
-        emit EventsLib.SetPriceManager(newPriceManager);
-    }
-
     function setPerformanceFee(uint256 newPerformanceFee) external onlyRole(GOVERNANCE_ROLE) {
         require(newPerformanceFee <= MAX_PERFORMANCE_FEE, ErrorsLib.FeeTooHigh());
         require(performanceFeeRecipient != address(0) || newPerformanceFee == 0, ErrorsLib.FeeInvariantBroken());
@@ -350,17 +342,19 @@ contract Vault is IVault, AccessManaged {
         _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
     }
 
-    /// @dev Syncs reported NAV without applying the max-rate cap.
-    function syncReportedNAV() external {
-        require(msg.sender == priceManager, ErrorsLib.Unauthorized());
-
+    /// @notice Deliberate, governance-only immediate NAV reflection that bypasses the maxRate cap.
+    /// @dev NOT a routine path. Routine NAV flows through `OffchainNAVStrategy.report()` and is
+    /// smoothed by maxRate via `accrueInterest`. This forces `_totalAssets` to the full real value in
+    /// one shot, removing the anti-jump guard — use only for trusted/authoritative marks or to correct
+    /// a stuck price. Gated by GOVERNANCE_ROLE (timelocked in production); emits a distinct event.
+    function forceSyncReportedNAV() external onlyRole(GOVERNANCE_ROLE) {
         uint256 newTotalAssets = _realAssets();
         uint256 previousTotalAssets = _totalAssets;
         (uint256 performanceFeeShares, uint256 managementFeeShares) =
             _previewFeeShares(previousTotalAssets, newTotalAssets, block.timestamp - lastUpdate);
 
         _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
-        emit EventsLib.SyncReportedNAV(msg.sender, previousTotalAssets, newTotalAssets);
+        emit EventsLib.ForceSyncReportedNAV(msg.sender, previousTotalAssets, newTotalAssets);
     }
 
     function _applyAccruedTotalAssets(uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares)

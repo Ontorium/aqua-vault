@@ -37,7 +37,6 @@ interface IVault is IERC4626, IERC2612 {
     function receiveAssetsGate() external view returns (address);
     function sendAssetsGate() external view returns (address);
     function strategyManager() external view returns (address);
-    function priceManager() external view returns (address);
     function firstTotalAssets() external view returns (uint256);
     function _totalAssets() external view returns (uint128);
     function lastUpdate() external view returns (uint64);
@@ -79,7 +78,6 @@ interface IVault is IERC4626, IERC2612 {
     function setReceiveAssetsGate(address newReceiveAssetsGate) external;
     function setSendAssetsGate(address newSendAssetsGate) external;
     function setStrategyManager(address newStrategyManager) external;
-    function setPriceManager(address newPriceManager) external;
     function setPerformanceFee(uint256 newPerformanceFee) external;
     function setManagementFee(uint256 newManagementFee) external;
     function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external;
@@ -102,7 +100,7 @@ interface IVault is IERC4626, IERC2612 {
 
     // Exchange rate
     function accrueInterest() external;
-    function syncReportedNAV() external;
+    function forceSyncReportedNAV() external;
     function accrueInterestView()
         external
         view
