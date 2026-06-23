@@ -9,7 +9,6 @@ import {Caps} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {IStrategyRegistry} from "./interfaces/IStrategyRegistry.sol";
-import {IVault} from "./interfaces/IVault.sol";
 import {AccessManaged} from "./AccessManaged.sol";
 
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
@@ -285,28 +284,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         }
 
         emit EventsLib.AfterDeallocate(strategy, ids, change, getStrategyAssets(strategy));
-    }
-
-    /* ALLOCATION HELPERS */
-
-    /// @notice Optional helper that relays allocate and deallocate calls to the vault.
-    /// @dev This contract must hold the required allocator roles for the relayed calls.
-    function rebalance(RebalanceAction[] calldata actions) external {
-        _requireAnyRole(GOVERNANCE_ROLE, CURATOR_ROLE, SENTINEL_ROLE);
-        uint256 len = actions.length;
-        for (uint256 i; i < len;) {
-            RebalanceAction calldata action = actions[i];
-            if (action.isAllocate) {
-                IVault(vault).allocate(action.strategy, action.data, action.assets);
-            } else {
-                IVault(vault).deallocate(action.strategy, action.data, action.assets);
-            }
-            unchecked {
-                ++i;
-            }
-        }
-
-        emit EventsLib.Rebalance(msg.sender, len);
     }
 
     /* AGGREGATE VIEWS */

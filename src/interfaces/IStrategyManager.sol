@@ -19,13 +19,6 @@ interface IStrategyManager {
         uint256 availableLiquidity;
     }
 
-    struct RebalanceAction {
-        address strategy;
-        bool isAllocate;
-        uint256 assets;
-        bytes data;
-    }
-
     function vault() external view returns (address);
     function asset() external view returns (address);
 

@@ -27,6 +27,15 @@ struct PendingWithdrawal {
     uint64 feeAtRequest;
 }
 
+/// @dev One leg of a {IVault.rebalance} batch. `isAllocate` selects allocate (vault -> strategy) vs
+/// deallocate (strategy -> vault); `data` is the strategy-specific payload.
+struct RebalanceAction {
+    address strategy;
+    bool isAllocate;
+    uint256 assets;
+    bytes data;
+}
+
 interface IVault is IERC4626, IERC2612 {
     // State variables
     function virtualShares() external view returns (uint256);
@@ -94,6 +103,9 @@ interface IVault is IERC4626, IERC2612 {
     // Allocator functions
     function allocate(address strategy, bytes calldata data, uint256 assets) external;
     function deallocate(address strategy, bytes calldata data, uint256 assets) external;
+    /// @notice Batched allocate/deallocate to move capital between strategies in one call. Allocate legs
+    /// respect the pause; deallocate (exit) legs remain available while paused.
+    function rebalance(RebalanceAction[] calldata actions) external;
     /// @notice Operator (ALLOCATOR_ROLE) moves each user's full pending request into their reserved
     /// `claimableAssets`, locking liquidity per-user. Caller controls fulfillment order via the list.
     function fulfillWithdrawal(address[] calldata onBehalfs) external;

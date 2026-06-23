@@ -6,7 +6,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IVault, PendingWithdrawal} from "./interfaces/IVault.sol";
+import {IVault, PendingWithdrawal, RebalanceAction} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {AccessManaged} from "./AccessManaged.sol";
@@ -307,6 +307,28 @@ contract Vault is IVault, AccessManaged {
     function deallocate(address strategy, bytes calldata data, uint256 assets) external {
         _requireAnyRole(ALLOCATOR_ROLE, SENTINEL_ROLE);
         deallocateInternal(strategy, data, assets);
+    }
+
+    /// @notice Moves capital between strategies in a single batch (e.g. deallocate from one, allocate to
+    /// another). Reverts the whole batch if any leg fails, so no partial moves can occur.
+    /// @dev Allocate legs are blocked while paused (entry); deallocate legs (exit) stay available. Calling
+    /// allocateInternal/deallocateInternal directly means the per-leg role checks are skipped — the single
+    /// ALLOCATOR_ROLE gate here covers the whole batch.
+    function rebalance(RebalanceAction[] calldata actions) external onlyRole(ALLOCATOR_ROLE) {
+        uint256 len = actions.length;
+        for (uint256 i; i < len;) {
+            RebalanceAction calldata action = actions[i];
+            if (action.isAllocate) {
+                require(!paused, ErrorsLib.Paused());
+                allocateInternal(action.strategy, action.data, action.assets);
+            } else {
+                deallocateInternal(action.strategy, action.data, action.assets);
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        emit EventsLib.Rebalance(msg.sender, len);
     }
 
     function deallocateInternal(address strategy, bytes calldata data, uint256 assets)
