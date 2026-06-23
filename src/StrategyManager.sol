@@ -34,7 +34,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     address public strategyRegistry;
 
-    address[] internal _strategies;
+    address[] public strategies;
     mapping(address strategy => uint256 indexPlusOne) internal _strategyIndexPlusOne;
     mapping(address strategy => StrategyConfig) public strategyConfig;
 
@@ -55,15 +55,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     /* GETTERS */
 
     function strategiesLength() external view returns (uint256) {
-        return _strategies.length;
-    }
-
-    function strategies(uint256 index) external view returns (address) {
-        return _strategies[index];
-    }
-
-    function allStrategies() external view returns (address[] memory) {
-        return _strategies;
+        return strategies.length;
     }
 
     function isStrategy(address strategy) public view returns (bool) {
@@ -87,7 +79,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     }
 
     /// @notice Returns the assets currently reported by `strategy`.
-    function strategyAllocation(address strategy) public view returns (uint256) {
+    function getStrategyAssets(address strategy) public view returns (uint256) {
         if (!isStrategy(strategy)) return 0;
         return IStrategy(strategy).totalAssets();
     }
@@ -109,11 +101,11 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     }
 
     function allStrategyInfo() external view returns (StrategyInfo[] memory infos) {
-        uint256 length = _strategies.length;
+        uint256 length = strategies.length;
         infos = new StrategyInfo[](length);
 
         for (uint256 i; i < length;) {
-            address strategy = _strategies[i];
+            address strategy = strategies[i];
             StrategyConfig memory config = strategyConfig[strategy];
 
             infos[i] = StrategyInfo({
@@ -136,10 +128,10 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     function setStrategyRegistry(address newStrategyRegistry) external onlyRole(GOVERNANCE_ROLE) {
         if (newStrategyRegistry != address(0)) {
-            uint256 len = _strategies.length;
+            uint256 len = strategies.length;
             for (uint256 i; i < len;) {
                 require(
-                    IStrategyRegistry(newStrategyRegistry).isInRegistry(_strategies[i]),
+                    IStrategyRegistry(newStrategyRegistry).isInRegistry(strategies[i]),
                     ErrorsLib.NotInStrategyRegistry()
                 );
                 unchecked {
@@ -165,19 +157,19 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
         // A strategy must be fully empty before removal — including any offchain/reported value,
         // so removal can never orphan funds still owed to the strategy.
-        require(strategyAllocation(strategy) == 0, ErrorsLib.ZeroAllocation());
+        require(getStrategyAssets(strategy) == 0, ErrorsLib.ZeroAllocation());
         require(IStrategy(strategy).totalAssets() == 0, ErrorsLib.ZeroAllocation());
 
         uint256 index = indexPlusOne - 1;
-        uint256 lastIndex = _strategies.length - 1;
+        uint256 lastIndex = strategies.length - 1;
 
         if (index != lastIndex) {
-            address lastStrategy = _strategies[lastIndex];
-            _strategies[index] = lastStrategy;
+            address lastStrategy = strategies[lastIndex];
+            strategies[index] = lastStrategy;
             _strategyIndexPlusOne[lastStrategy] = index + 1;
         }
 
-        _strategies.pop();
+        strategies.pop();
 
         delete _strategyIndexPlusOne[strategy];
         delete strategyConfig[strategy];
@@ -293,7 +285,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
         _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
 
-        emit EventsLib.AfterAllocate(strategy, ids, change, strategyAllocation(strategy));
+        emit EventsLib.AfterAllocate(strategy, ids, change, getStrategyAssets(strategy));
     }
 
     /// @notice Updates cap accounting after a vault deallocation.
@@ -311,7 +303,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             }
         }
 
-        emit EventsLib.AfterDeallocate(strategy, ids, change, strategyAllocation(strategy));
+        emit EventsLib.AfterDeallocate(strategy, ids, change, getStrategyAssets(strategy));
     }
 
     /* ALLOCATION HELPERS */
@@ -339,9 +331,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     /* AGGREGATE VIEWS */
 
     function totalStrategyAssets() external view returns (uint256 totalAssets) {
-        uint256 len = _strategies.length;
+        uint256 len = strategies.length;
         for (uint256 i; i < len;) {
-            totalAssets += IStrategy(_strategies[i]).totalAssets();
+            totalAssets += IStrategy(strategies[i]).totalAssets();
             unchecked {
                 ++i;
             }
@@ -349,61 +341,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     }
 
     function availableStrategyLiquidity() external view returns (uint256 liquidity) {
-        uint256 len = _strategies.length;
+        uint256 len = strategies.length;
         for (uint256 i; i < len;) {
-            liquidity += _availableLiquidityOf(_strategies[i]);
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function totalOnchainStrategyAssets() external view returns (uint256 totalAssets) {
-        uint256 len = _strategies.length;
-        for (uint256 i; i < len;) {
-            address strategy = _strategies[i];
-            if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
-                totalAssets += IStrategy(strategy).totalAssets();
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function availableOnchainStrategyLiquidity() external view returns (uint256 liquidity) {
-        uint256 len = _strategies.length;
-        for (uint256 i; i < len;) {
-            address strategy = _strategies[i];
-            if (strategyConfig[strategy].kind == STRATEGY_KIND_ONCHAIN) {
-                liquidity += _availableLiquidityOf(strategy);
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function totalOffchainStrategyAssets() external view returns (uint256 totalAssets) {
-        uint256 len = _strategies.length;
-        for (uint256 i; i < len;) {
-            address strategy = _strategies[i];
-            if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
-                totalAssets += IStrategy(strategy).totalAssets();
-            }
-            unchecked {
-                ++i;
-            }
-        }
-    }
-
-    function availableOffchainStrategyLiquidity() external view returns (uint256 liquidity) {
-        uint256 len = _strategies.length;
-        for (uint256 i; i < len;) {
-            address strategy = _strategies[i];
-            if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV) {
-                liquidity += _availableLiquidityOf(strategy);
-            }
+            liquidity += _availableLiquidityOf(strategies[i]);
             unchecked {
                 ++i;
             }
@@ -422,8 +362,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         );
 
         if (!isStrategy(strategy)) {
-            _strategies.push(strategy);
-            _strategyIndexPlusOne[strategy] = _strategies.length;
+            strategies.push(strategy);
+            _strategyIndexPlusOne[strategy] = strategies.length;
 
             strategyConfig[strategy] = StrategyConfig({
                 exists: true,
@@ -453,7 +393,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         if (capBps == 0) return;
 
         require(
-            strategyAllocation(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS), ErrorsLib.RelativeCapExceeded()
+            getStrategyAssets(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS),
+            ErrorsLib.RelativeCapExceeded()
         );
     }
 }

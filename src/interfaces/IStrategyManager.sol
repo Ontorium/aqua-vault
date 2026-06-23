@@ -60,7 +60,7 @@ interface IStrategyManager {
     function isStrategyActive(address strategy) external view returns (bool);
 
     function strategyRegistry() external view returns (address);
-    function strategyAllocation(address strategy) external view returns (uint256);
+    function getStrategyAssets(address strategy) external view returns (uint256);
     function forceDeallocatePenalty(address strategy) external view returns (uint256);
 
     function absoluteCap(bytes32 id) external view returns (uint256);
