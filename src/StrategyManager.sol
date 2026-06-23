@@ -85,16 +85,13 @@ contract StrategyManager is IStrategyManager, AccessManaged {
     }
 
     function strategyInfo(address strategy) external view returns (StrategyInfo memory info) {
+        bool registered = isStrategy(strategy);
         StrategyConfig memory config = strategyConfig[strategy];
 
         info.strategy = strategy;
-        info.exists = config.exists;
-        info.active = config.active;
-        info.kind = config.kind;
-        info.capBps = config.capBps;
-        info.targetBps = config.targetBps;
+        info.config = config;
 
-        if (config.exists) {
+        if (registered) {
             info.totalAssets = IStrategy(strategy).totalAssets();
             info.availableLiquidity = _availableLiquidityOf(strategy);
         }
@@ -110,11 +107,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
             infos[i] = StrategyInfo({
                 strategy: strategy,
-                exists: config.exists,
-                active: config.active,
-                kind: config.kind,
-                capBps: config.capBps,
-                targetBps: config.targetBps,
+                config: config,
                 totalAssets: IStrategy(strategy).totalAssets(),
                 availableLiquidity: _availableLiquidityOf(strategy)
             });
@@ -144,11 +137,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         emit EventsLib.SetStrategyRegistry(newStrategyRegistry);
     }
 
-    function addStrategy(address strategy, uint8 kind, uint256 capBps, uint256 targetBps)
-        external
-        onlyRole(GOVERNANCE_ROLE)
-    {
-        _addStrategy(strategy, kind, capBps, targetBps);
+    function addStrategy(address strategy, uint8 kind, uint256 targetBps) external onlyRole(GOVERNANCE_ROLE) {
+        _addStrategy(strategy, kind, targetBps);
     }
 
     function removeStrategy(address strategy) external onlyRole(GOVERNANCE_ROLE) {
@@ -182,14 +172,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
         strategyConfig[strategy].active = active;
         emit EventsLib.SetStrategyActive(strategy, active);
-    }
-
-    function setStrategyCapBps(address strategy, uint256 capBps) external onlyRole(GOVERNANCE_ROLE) {
-        require(isStrategy(strategy), ErrorsLib.NotStrategy());
-        require(capBps <= BPS, ErrorsLib.RelativeCapAboveOne());
-
-        strategyConfig[strategy].capBps = uint16(capBps);
-        emit EventsLib.SetStrategyCapBps(strategy, capBps);
     }
 
     function setStrategyTargetBps(address strategy, uint256 targetBps) external onlyRole(GOVERNANCE_ROLE) {
@@ -264,8 +246,9 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         external
         onlyVault
     {
+        require(isStrategy(strategy), ErrorsLib.NotStrategy());
         StrategyConfig memory config = strategyConfig[strategy];
-        require(config.exists && config.active, ErrorsLib.NotStrategy());
+        require(config.active, ErrorsLib.NotStrategy());
 
         uint256 len = ids.length;
         for (uint256 i; i < len;) {
@@ -282,8 +265,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
                 ++i;
             }
         }
-
-        _enforceStrategyCap(strategy, config.capBps, totalAssetsForCaps);
 
         emit EventsLib.AfterAllocate(strategy, ids, change, getStrategyAssets(strategy));
     }
@@ -352,9 +333,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     /* INTERNAL FUNCTIONS */
 
-    function _addStrategy(address strategy, uint8 kind, uint256 capBps, uint256 targetBps) internal {
+    function _addStrategy(address strategy, uint8 kind, uint256 targetBps) internal {
         require(strategy != address(0), ErrorsLib.ZeroAddress());
-        require(capBps <= BPS, ErrorsLib.RelativeCapAboveOne());
         require(targetBps <= BPS, ErrorsLib.RelativeCapAboveOne());
         require(
             strategyRegistry == address(0) || IStrategyRegistry(strategyRegistry).isInRegistry(strategy),
@@ -366,9 +346,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
             _strategyIndexPlusOne[strategy] = strategies.length;
 
             strategyConfig[strategy] = StrategyConfig({
-                exists: true,
                 active: true,
-                capBps: uint16(capBps),
                 targetBps: uint16(targetBps),
                 kind: kind,
                 forceDeallocatePenalty: 0
@@ -376,7 +354,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
             emit EventsLib.AddStrategy(strategy);
             emit EventsLib.SetStrategyKind(strategy, kind);
-            emit EventsLib.SetStrategyCapBps(strategy, capBps);
             emit EventsLib.SetStrategyTargetBps(strategy, targetBps);
         }
     }
@@ -389,12 +366,4 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         }
     }
 
-    function _enforceStrategyCap(address strategy, uint256 capBps, uint256 totalAssetsForCaps) internal view {
-        if (capBps == 0) return;
-
-        require(
-            getStrategyAssets(strategy) <= totalAssetsForCaps.mulDivDown(capBps, BPS),
-            ErrorsLib.RelativeCapExceeded()
-        );
-    }
 }

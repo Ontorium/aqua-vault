@@ -29,8 +29,8 @@ contract AquaStrategyTest is BaseTest {
         );
     }
 
-    /// @dev ids[0] = adapterId (per-instance), ids[1] = per-aToken grouping. Matches AquaStrategy._ids().
-    function _expectedAdapterId() internal view returns (bytes32) {
+    /// @dev ids[0] = strategyId (per-instance), ids[1] = per-aToken grouping. Matches AquaStrategy._ids().
+    function _expectedStrategyId() internal view returns (bytes32) {
         return keccak256(abi.encode("AquaStrategy", address(strategy)));
     }
 
@@ -89,9 +89,9 @@ contract AquaStrategyTest is BaseTest {
         // totalAssets mirrors the aToken balance.
         assertEq(strategy.totalAssets(), amount, "totalAssets == aToken balance");
 
-        // Return values: 2-level ids (adapter / aToken), change = +amount.
+        // Return values: 2-level ids (strategy / aToken), change = +amount.
         assertEq(ids.length, 2);
-        assertEq(ids[0], _expectedAdapterId(), "id[0] = adapter");
+        assertEq(ids[0], _expectedStrategyId(), "id[0] = strategy");
         assertEq(ids[1], _expectedATokenId(), "id[1] = aToken group");
         assertEq(change, int256(amount), "change");
     }
@@ -102,7 +102,7 @@ contract AquaStrategyTest is BaseTest {
 
         assertEq(aToken.balanceOf(address(strategy)), 0, "no aTokens");
         assertEq(ids.length, 2);
-        assertEq(ids[0], _expectedAdapterId());
+        assertEq(ids[0], _expectedStrategyId());
         assertEq(ids[1], _expectedATokenId());
         assertEq(change, 0);
     }
@@ -145,7 +145,7 @@ contract AquaStrategyTest is BaseTest {
         // Underlying flows back to the strategy (vault then pulls it via safeTransferFrom).
         assertEq(underlyingToken.balanceOf(address(strategy)), withdrawAmt, "underlying returned");
         assertEq(ids.length, 2);
-        assertEq(ids[0], _expectedAdapterId());
+        assertEq(ids[0], _expectedStrategyId());
         assertEq(ids[1], _expectedATokenId());
         assertEq(change, -int256(withdrawAmt), "change negative");
     }
@@ -195,13 +195,13 @@ contract AquaStrategyTest is BaseTest {
 
     /// forge-config: default.isolate = true
     function testVaultAllocateRoutesToAaveAndReceivesATokens() public {
-        // Register the strategy and lift the cap for BOTH ids it emits (adapter + aToken group).
-        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        // Register the strategy and lift the cap for BOTH ids it emits (strategy + aToken group).
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
         bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
         vm.startPrank(governance);
-        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0, 0);
-        strategyManager.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        strategyManager.increaseRelativeCap(adapterIdData, WAD);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        strategyManager.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(strategyIdData, WAD);
         strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
         strategyManager.increaseRelativeCap(aTokenIdData, WAD);
         vm.stopPrank();
@@ -221,7 +221,7 @@ contract AquaStrategyTest is BaseTest {
         // aTokens received by the strategy; StrategyManager sees the assets.
         assertEq(aToken.balanceOf(address(strategy)), deposit, "strategy holds aTokens");
         assertEq(strategyManager.totalStrategyAssets(), deposit, "SM aggregates aToken value");
-        assertEq(strategyManager.allocation(_expectedAdapterId()), deposit, "adapter cap allocation tracked");
+        assertEq(strategyManager.allocation(_expectedStrategyId()), deposit, "strategy cap allocation tracked");
         assertEq(strategyManager.allocation(_expectedATokenId()), deposit, "aToken cap allocation tracked");
 
         // Interest accrues in Aave; the vault's totalAssets picks it up (within maxRate).
@@ -237,12 +237,12 @@ contract AquaStrategyTest is BaseTest {
     /// totalAssets → vault totalAssets → per-share value (capped by maxRate).
     /// forge-config: default.isolate = true
     function testATokenInterestRaisesVaultSharePrice() public {
-        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
         bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
         vm.startPrank(governance);
-        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0, 0);
-        strategyManager.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        strategyManager.increaseRelativeCap(adapterIdData, WAD);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        strategyManager.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(strategyIdData, WAD);
         strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
         strategyManager.increaseRelativeCap(aTokenIdData, WAD);
         vault.setMaxRate(MAX_MAX_RATE); // allow the share price to grow with real yield

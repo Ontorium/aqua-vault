@@ -29,7 +29,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
     address public immutable asset;
     IMorpho public immutable morpho;
     /// @dev Strategy-level id used for aggregate caps.
-    bytes32 public immutable adapterId;
+    bytes32 public immutable strategyId;
 
     /* STORAGE */
 
@@ -73,7 +73,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
         vault = _vault;
         asset = _asset;
         morpho = IMorpho(_morpho);
-        adapterId = keccak256(abi.encode("MorphoStrategy", address(this)));
+        strategyId = keccak256(abi.encode("MorphoStrategy", address(this)));
 
         SafeERC20Lib.safeApprove(_asset, _morpho, type(uint256).max);
         // Vault pulls deallocated funds via transferFrom(strategy, vault, amt).
@@ -231,7 +231,7 @@ contract MorphoStrategy is IStrategy, AccessManaged {
     /// @dev Returns ids for strategy-, collateral-, and market-level caps.
     function _ids(MarketParams memory mp) internal view returns (bytes32[] memory ids_) {
         ids_ = new bytes32[](3);
-        ids_[0] = adapterId;
+        ids_[0] = strategyId;
         ids_[1] = keccak256(abi.encode("collateralToken", mp.collateralToken));
         ids_[2] = keccak256(abi.encode(address(this), Id.unwrap(mp.id())));
     }

@@ -22,7 +22,7 @@ import {ERC20Mock} from "../../test/mocks/ERC20Mock.sol";
 ///
 /// The signer self-grants the vault-scoped GOVERNANCE_ROLE (admined by DEFAULT_ADMIN_ROLE),
 /// whitelists the mock IRM, adds the strategy, and lifts caps for ALL THREE ids the strategy emits
-/// (adapter / collateral / market) so a later `vault.allocate` is not blocked by a zero cap.
+/// (strategy / collateral / market) so a later `vault.allocate` is not blocked by a zero cap.
 ///
 /// Repeat once per vault: each vault needs its OWN MorphoStrategy instance (vault/asset are
 /// immutable at construction). Re-running deploys a fresh mock Morpho — pass the SAME mock across
@@ -76,7 +76,7 @@ contract DeployMorphoStrategy is EnvSigner {
         strategy.setIrmApproved(address(irm), true);
 
         // 5. Register the strategy (kind=1: ONCHAIN -> "DeFi" bucket).
-        sm.addStrategy(address(strategy), 1, 0, 0);
+        sm.addStrategy(address(strategy), 1, 0);
 
         // 6. Lift caps for the three ids emitted by `MorphoStrategy._ids` for the canonical market.
         //    All three must permit flow or `allocate()` reverts on the smallest.
@@ -88,12 +88,12 @@ contract DeployMorphoStrategy is EnvSigner {
             lltv: 0.86e18
         });
 
-        bytes memory adapterIdData = abi.encode("MorphoStrategy", address(strategy));
+        bytes memory strategyIdData = abi.encode("MorphoStrategy", address(strategy));
         bytes memory collateralIdData = abi.encode("collateralToken", address(collateral));
         bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
 
-        sm.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        sm.increaseRelativeCap(adapterIdData, WAD);
+        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, WAD);
         sm.increaseAbsoluteCap(collateralIdData, type(uint128).max);
         sm.increaseRelativeCap(collateralIdData, WAD);
         sm.increaseAbsoluteCap(marketIdData, type(uint128).max);

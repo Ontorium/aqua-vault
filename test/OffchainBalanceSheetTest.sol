@@ -40,7 +40,7 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         // Register the strategy with kind=2 (offchain NAV).
         vm.startPrank(governance);
-        strategyManager.addStrategy(address(strategy), 2 /* OFFCHAIN_NAV */, 0, 0);
+        strategyManager.addStrategy(address(strategy), 2 /* OFFCHAIN_NAV */, 0);
         strategyManager.increaseAbsoluteCap(abi.encode(address(strategy), address(underlyingToken)), type(uint128).max);
         strategyManager.increaseRelativeCap(abi.encode(address(strategy), address(underlyingToken)), WAD);
         vm.stopPrank();

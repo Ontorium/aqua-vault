@@ -66,7 +66,7 @@ contract DeployOffchainStrategy is EnvSigner {
         if (!rm.hasRole(govRole, signer)) rm.grantRole(govRole, signer);
 
         // 3. Register on SM (kind=2 = OFFCHAIN_NAV).
-        sm.addStrategy(address(strategy), 2, 0, 0);
+        sm.addStrategy(address(strategy), 2, 0);
 
         // 4. Lift the strategy's single id cap to max. OffchainNAVStrategy's id is
         //    keccak256(abi.encode(address(strategy), asset)) — must encode in that exact order to

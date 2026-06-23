@@ -120,7 +120,7 @@ contract IntegrationReport is EnvSigner {
         // 4. Deploy + register a strategy (GOVERNANCE), lift caps to max.
         a = _snap();
         strategy = new StrategyMock(address(vault), address(asset));
-        sm.addStrategy(address(strategy), 1 /* STRATEGY_KIND_ONCHAIN */, 0, 0);
+        sm.addStrategy(address(strategy), 1 /* STRATEGY_KIND_ONCHAIN */, 0);
         sm.increaseAbsoluteCap(bytes("id-0"), type(uint128).max);
         sm.increaseAbsoluteCap(bytes("id-1"), type(uint128).max);
         sm.increaseRelativeCap(bytes("id-0"), WAD);

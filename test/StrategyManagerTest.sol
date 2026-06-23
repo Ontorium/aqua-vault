@@ -24,14 +24,14 @@ contract StrategyManagerTest is BaseTest {
         vm.assume(rdm != governance && rdm != address(timelock));
         vm.expectRevert(ErrorsLib.Unauthorized.selector);
         vm.prank(rdm);
-        strategyManager.addStrategy(address(strategy), 1, 0, 0);
+        strategyManager.addStrategy(address(strategy), 1, 0);
     }
 
     function testAddStrategy() public {
         vm.expectEmit();
         emit EventsLib.AddStrategy(address(strategy));
         vm.prank(governance);
-        strategyManager.addStrategy(address(strategy), 1, 500, 200);
+        strategyManager.addStrategy(address(strategy), 1, 200);
 
         assertTrue(strategyManager.isStrategy(address(strategy)));
         assertTrue(strategyManager.isStrategyActive(address(strategy)));
@@ -40,22 +40,20 @@ contract StrategyManagerTest is BaseTest {
 
         IStrategyManager.StrategyInfo memory info = strategyManager.strategyInfo(address(strategy));
         assertEq(info.strategy, address(strategy));
-        assertTrue(info.exists);
-        assertTrue(info.active);
-        assertEq(info.kind, 1);
-        assertEq(info.capBps, 500);
-        assertEq(info.targetBps, 200);
+        assertTrue(info.config.active);
+        assertEq(info.config.targetBps, 200);
+        assertEq(info.config.kind, 1);
     }
 
     function testAddStrategyRejectsZero() public {
         vm.prank(governance);
         vm.expectRevert(ErrorsLib.ZeroAddress.selector);
-        strategyManager.addStrategy(address(0), 1, 0, 0);
+        strategyManager.addStrategy(address(0), 1, 0);
     }
 
     function testRemoveStrategy() public {
         vm.prank(governance);
-        strategyManager.addStrategy(address(strategy), 1, 0, 0);
+        strategyManager.addStrategy(address(strategy), 1, 0);
 
         vm.expectEmit();
         emit EventsLib.RemoveStrategy(address(strategy));
@@ -68,7 +66,7 @@ contract StrategyManagerTest is BaseTest {
 
     function testRemoveStrategyBlockedWhenAllocated() public {
         vm.prank(governance);
-        strategyManager.addStrategy(address(strategy), 1, 0, 0);
+        strategyManager.addStrategy(address(strategy), 1, 0);
 
         // Simulate a residual allocation by directly minting tokens to the strategy and bumping its books.
         underlyingToken.mint(address(strategy), 1);
@@ -92,7 +90,7 @@ contract StrategyManagerTest is BaseTest {
 
     function testSetStrategyActive() public {
         vm.startPrank(governance);
-        strategyManager.addStrategy(address(strategy), 1, 0, 0);
+        strategyManager.addStrategy(address(strategy), 1, 0);
 
         vm.expectEmit();
         emit EventsLib.SetStrategyActive(address(strategy), false);
@@ -148,7 +146,7 @@ contract StrategyManagerTest is BaseTest {
         penalty = bound(penalty, 0, MAX_FORCE_DEALLOCATE_PENALTY);
 
         vm.prank(governance);
-        strategyManager.addStrategy(address(strategy), 1, 0, 0);
+        strategyManager.addStrategy(address(strategy), 1, 0);
 
         vm.prank(governance);
         vm.expectEmit();
@@ -170,8 +168,8 @@ contract StrategyManagerTest is BaseTest {
         StrategyMock s2 = new StrategyMock(address(vault), address(underlyingToken));
 
         vm.startPrank(governance);
-        strategyManager.addStrategy(address(s1), 1, 0, 0);
-        strategyManager.addStrategy(address(s2), 1, 0, 0);
+        strategyManager.addStrategy(address(s1), 1, 0);
+        strategyManager.addStrategy(address(s2), 1, 0);
         strategyManager.increaseAbsoluteCap(bytes("id-0"), type(uint128).max);
         strategyManager.increaseAbsoluteCap(bytes("id-1"), type(uint128).max);
         strategyManager.increaseRelativeCap(bytes("id-0"), WAD);

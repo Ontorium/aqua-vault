@@ -64,18 +64,18 @@ contract AquaForkTest is Test {
         vm.prank(ADMIN);
         rm.grantRole(govRole, address(this));
 
-        // Register the strategy and lift caps for BOTH ids it emits (adapter + aToken group).
-        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        // Register the strategy and lift caps for BOTH ids it emits (strategy + aToken group).
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
         bytes memory aTokenIdData = abi.encode("aToken", ATOKEN);
-        sm.addStrategy(address(strategy), 1 /* ONCHAIN */, 0, 0);
-        sm.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        sm.increaseRelativeCap(adapterIdData, WAD);
+        sm.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, WAD);
         sm.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
         sm.increaseRelativeCap(aTokenIdData, WAD);
         rm.grantRole(rm.getScopedRole(VAULT, "ALLOCATOR_ROLE"), address(this)); // admin = GOV (held above)
     }
 
-    function _adapterId() internal view returns (bytes32) {
+    function _strategyId() internal view returns (bytes32) {
         return keccak256(abi.encode("AquaStrategy", address(strategy)));
     }
 
@@ -104,7 +104,7 @@ contract AquaForkTest is Test {
         // from prior deployments, an OffchainNAVStrategy). Capture baselines so we assert on the
         // DELTA introduced by this test rather than absolute totals.
         uint256 smBaseline = sm.totalStrategyAssets();
-        uint256 adapterBaseline = sm.allocation(_adapterId());
+        uint256 strategyBaseline = sm.allocation(_strategyId());
         uint256 aTokenBaseline = sm.allocation(_aTokenId());
 
         _depositAndAllocate();
@@ -115,7 +115,7 @@ contract AquaForkTest is Test {
         // StrategyManager aggregates: the DELTA should equal AMOUNT (other strategies' balances
         // could rebase by a few wei during the test, so allow a small slack).
         assertApproxEqAbs(sm.totalStrategyAssets() - smBaseline, AMOUNT, 100, "SM aggregates delta");
-        assertApproxEqAbs(sm.allocation(_adapterId()) - adapterBaseline, AMOUNT, 1, "adapter cap delta");
+        assertApproxEqAbs(sm.allocation(_strategyId()) - strategyBaseline, AMOUNT, 1, "strategy cap delta");
         assertApproxEqAbs(sm.allocation(_aTokenId()) - aTokenBaseline, AMOUNT, 100, "aToken cap delta");
 
         console.log("aToken (acUSDT) held by strategy:", IERC20(ATOKEN).balanceOf(address(strategy)));

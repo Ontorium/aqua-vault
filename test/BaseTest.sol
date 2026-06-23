@@ -147,7 +147,7 @@ abstract contract BaseTest is Test {
     function _addStrategyWithMaxCaps() internal returns (StrategyMock strategy) {
         strategy = new StrategyMock(address(vault), address(underlyingToken));
         vm.startPrank(governance);
-        strategyManager.addStrategy(address(strategy), 1 /* STRATEGY_KIND_ONCHAIN */, 0, 0);
+        strategyManager.addStrategy(address(strategy), 1 /* STRATEGY_KIND_ONCHAIN */, 0);
         strategyManager.increaseAbsoluteCap(bytes("id-0"), type(uint128).max);
         strategyManager.increaseAbsoluteCap(bytes("id-1"), type(uint128).max);
         strategyManager.increaseRelativeCap(bytes("id-0"), WAD);

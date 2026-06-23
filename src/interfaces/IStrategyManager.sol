@@ -6,21 +6,15 @@ import {Caps} from "./IVault.sol";
 
 interface IStrategyManager {
     struct StrategyConfig {
-        bool exists;
         bool active;
-        uint16 capBps;
         uint16 targetBps;
-        uint8 kind; // 0 = onchain, 1 = offchain reported, custom values are allowed.
+        uint8 kind;
         uint64 forceDeallocatePenalty;
     }
 
     struct StrategyInfo {
         address strategy;
-        bool exists;
-        bool active;
-        uint8 kind;
-        uint256 capBps;
-        uint256 targetBps;
+        StrategyConfig config;
         uint256 totalAssets;
         uint256 availableLiquidity;
     }
@@ -37,10 +31,9 @@ interface IStrategyManager {
 
     function setStrategyRegistry(address newStrategyRegistry) external;
 
-    function addStrategy(address strategy, uint8 kind, uint256 capBps, uint256 targetBps) external;
+    function addStrategy(address strategy, uint8 kind, uint256 targetBps) external;
     function removeStrategy(address strategy) external;
     function setStrategyActive(address strategy, bool active) external;
-    function setStrategyCapBps(address strategy, uint256 capBps) external;
     function setStrategyTargetBps(address strategy, uint256 targetBps) external;
     function setStrategyKind(address strategy, uint8 kind) external;
 

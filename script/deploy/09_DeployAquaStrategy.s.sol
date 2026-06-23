@@ -13,7 +13,7 @@ import {EnvSigner} from "../EnvSigner.sol";
 /// @notice Step 9 — deploy an AquaStrategy for an existing vault and wire it into the vault's
 /// StrategyManager. The signer self-grants the vault-scoped GOVERNANCE_ROLE (admined by
 /// DEFAULT_ADMIN_ROLE), registers the strategy as kind=1 (ONCHAIN), and lifts caps to max for both
-/// emitted ids (adapter + aToken).
+/// emitted ids (strategy + aToken).
 ///
 /// Repeat once per vault: each vault needs its OWN AquaStrategy instance because the strategy
 /// address is bound to a single (vault, asset, aToken) tuple at construction.
@@ -56,17 +56,16 @@ contract DeployAquaStrategy is EnvSigner {
         bytes32 govRole = rm.getScopedRole(vaultAddr, "GOVERNANCE_ROLE");
         rm.grantRole(govRole, signer);
 
-        // 3. Register strategy (kind=1: ONCHAIN, capBps=0/targetBps=0 keeps shares allocation
-        //    unconstrained at the SM-share level; the per-id caps below are what bound flow).
-        sm.addStrategy(address(strategy), 1, 0, 0);
+        // 3. Register strategy (kind=1: ONCHAIN, targetBps=0). The per-id caps below bound flow.
+        sm.addStrategy(address(strategy), 1, 0);
 
-        // 4. Lift caps for both ids the strategy emits: the adapter id (strategy-level aggregate)
+        // 4. Lift caps for both ids the strategy emits: the strategy id (strategy-level aggregate)
         //    and the aToken id (cross-strategy aggregate per aToken). Both must permit flow or
         //    allocate() reverts on the smaller of the two.
-        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
         bytes memory aTokenIdData = abi.encode("aToken", aToken);
-        sm.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        sm.increaseRelativeCap(adapterIdData, WAD);
+        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, WAD);
         sm.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
         sm.increaseRelativeCap(aTokenIdData, WAD);
 

@@ -240,10 +240,11 @@ contract ScenarioReport is EnvSigner, StdCheats {
     /// @dev Scans every registered strategy and returns the first one with an `aToken()` getter —
     /// the AquaStrategy fingerprint (Morpho/Offchain strategies don't have it).
     function _findRegisteredAquaStrategy() internal view returns (address) {
-        address[] memory list = sm.allStrategies();
-        for (uint256 i; i < list.length; i++) {
-            try AquaStrategy(list[i]).aToken() returns (address) {
-                return list[i];
+        uint256 len = sm.strategiesLength();
+        for (uint256 i; i < len; i++) {
+            address strategy = sm.strategies(i);
+            try AquaStrategy(strategy).aToken() returns (address) {
+                return strategy;
             } catch {}
         }
         return address(0);
@@ -251,10 +252,11 @@ contract ScenarioReport is EnvSigner, StdCheats {
 
     /// @dev OffchainNAVStrategy fingerprint: only this strategy exposes `custodian()` (Aqua/Morpho don't).
     function _findRegisteredOffchainStrategy() internal view returns (address) {
-        address[] memory list = sm.allStrategies();
-        for (uint256 i; i < list.length; i++) {
-            try OffchainNAVStrategy(list[i]).custodian() returns (address) {
-                return list[i];
+        uint256 len = sm.strategiesLength();
+        for (uint256 i; i < len; i++) {
+            address strategy = sm.strategies(i);
+            try OffchainNAVStrategy(strategy).custodian() returns (address) {
+                return strategy;
             } catch {}
         }
         return address(0);
@@ -270,7 +272,7 @@ contract ScenarioReport is EnvSigner, StdCheats {
         bytes32 gov = rm.getScopedRole(address(vault), "GOVERNANCE_ROLE");
         if (!rm.hasRole(gov, deployer)) rm.grantRole(gov, deployer);
 
-        sm.addStrategy(address(offchain), 1 /* ONCHAIN */, 0, 0);
+        sm.addStrategy(address(offchain), 1 /* ONCHAIN */, 0);
         bytes32 strategyIdHash = offchain.strategyId();
         bytes memory idData = abi.encode(address(offchain), address(asset));
         // strategyId is keccak256(abi.encode(address(this), asset)); idData matches.
@@ -291,11 +293,11 @@ contract ScenarioReport is EnvSigner, StdCheats {
         bytes32 gov = rm.getScopedRole(address(vault), "GOVERNANCE_ROLE");
         if (!rm.hasRole(gov, deployer)) rm.grantRole(gov, deployer);
 
-        sm.addStrategy(address(strategy), 1, 0, 0);
-        bytes memory adapterIdData = abi.encode("AquaStrategy", address(strategy));
+        sm.addStrategy(address(strategy), 1, 0);
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
         bytes memory aTokenIdData = abi.encode("aToken", aTokenAddr);
-        sm.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        sm.increaseRelativeCap(adapterIdData, WAD);
+        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, WAD);
         sm.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
         sm.increaseRelativeCap(aTokenIdData, WAD);
 

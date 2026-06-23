@@ -29,7 +29,7 @@ interface IERC20Min {
 ///      manual rescue step.
 ///   3. `removeStrategy(old)` clears it from the SM.
 ///   4. Deploy a NEW AquaStrategy (constructor now approves `_vault` per the fix) and `addStrategy`
-///      it, lifting per-id caps to max for both the adapter and the aToken aggregate.
+///      it, lifting per-id caps to max for both the strategy and the aToken aggregate.
 ///
 /// Args:
 ///   vault           Vault contract (asset is read from it)
@@ -79,12 +79,12 @@ contract RotateAquaStrategy is EnvSigner {
 
         // 3. Deploy + register fixed strategy.
         AquaStrategy newStrat = new AquaStrategy(vaultAddr, asset, lendingPool, aToken, rmAddr);
-        sm.addStrategy(address(newStrat), 1 /* ONCHAIN */, 0, 0);
+        sm.addStrategy(address(newStrat), 1 /* ONCHAIN */, 0);
 
-        bytes memory adapterIdData = abi.encode("AquaStrategy", address(newStrat));
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(newStrat));
         bytes memory aTokenIdData = abi.encode("aToken", aToken);
-        sm.increaseAbsoluteCap(adapterIdData, type(uint128).max);
-        sm.increaseRelativeCap(adapterIdData, WAD);
+        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, WAD);
         sm.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
         sm.increaseRelativeCap(aTokenIdData, WAD);
 
@@ -103,10 +103,11 @@ contract RotateAquaStrategy is EnvSigner {
     }
 
     function _findExistingAqua(StrategyManager sm) internal view returns (address) {
-        address[] memory list = sm.allStrategies();
-        for (uint256 i; i < list.length; i++) {
-            try AquaStrategy(list[i]).aToken() returns (address) {
-                return list[i];
+        uint256 len = sm.strategiesLength();
+        for (uint256 i; i < len; i++) {
+            address strategy = sm.strategies(i);
+            try AquaStrategy(strategy).aToken() returns (address) {
+                return strategy;
             } catch {}
         }
         return address(0);

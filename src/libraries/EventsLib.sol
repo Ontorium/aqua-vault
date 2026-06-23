@@ -94,7 +94,6 @@ library EventsLib {
     // StrategyManager-related events
     event SetStrategyManager(address indexed newStrategyManager);
     event SetStrategyActive(address indexed strategy, bool active);
-    event SetStrategyCapBps(address indexed strategy, uint256 capBps);
     event SetStrategyTargetBps(address indexed strategy, uint256 targetBps);
     event SetStrategyKind(address indexed strategy, uint8 kind);
     event AfterAllocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);

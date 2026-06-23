@@ -56,7 +56,7 @@ contract MorphoStrategyTest is BaseTest {
         (ids, change) = strategy.allocate(abi.encode(mp), amount, bytes4(0), address(0));
     }
 
-    function _expectedAdapterId() internal view returns (bytes32) {
+    function _expectedStrategyId() internal view returns (bytes32) {
         return keccak256(abi.encode("MorphoStrategy", address(strategy)));
     }
 
@@ -91,7 +91,7 @@ contract MorphoStrategyTest is BaseTest {
         assertApproxEqAbs(strategy.totalAssets(), amount, 1, "totalAssets ~= supplied");
         assertEq(change, int256(strategy.totalAssets()), "change matches");
         assertEq(ids.length, 3, "3-tier ids");
-        assertEq(ids[0], _expectedAdapterId(), "adapter id");
+        assertEq(ids[0], _expectedStrategyId(), "strategy id");
         assertEq(ids[1], _expectedCollateralId(collateralA), "collateral id");
         assertEq(ids[2], _expectedMarketId(mp), "market id");
     }
@@ -199,7 +199,7 @@ contract MorphoStrategyTest is BaseTest {
         MarketParams memory mp = _params(collateralA, address(irm));
         (bytes32[] memory ids,) = _fundAndAllocate(mp, 100e18);
         assertEq(ids.length, 3);
-        assertEq(ids[0], _expectedAdapterId(), "[0] = adapter");
+        assertEq(ids[0], _expectedStrategyId(), "[0] = strategy");
         assertEq(ids[1], _expectedCollateralId(collateralA), "[1] = collateral");
         assertEq(ids[2], _expectedMarketId(mp), "[2] = market");
     }

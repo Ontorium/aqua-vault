@@ -19,7 +19,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
     address public immutable lendingPool;
     address public immutable aToken;
     /// @dev Strategy-level id used for aggregate caps.
-    bytes32 public immutable adapterId;
+    bytes32 public immutable strategyId;
 
     /* STORAGE */
 
@@ -57,7 +57,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
         asset = _asset;
         lendingPool = _lendingPool;
         aToken = _aToken;
-        adapterId = keccak256(abi.encode("AquaStrategy", address(this)));
+        strategyId = keccak256(abi.encode("AquaStrategy", address(this)));
 
         SafeERC20Lib.safeApprove(_asset, _lendingPool, type(uint256).max);
         // Vault pulls deallocated funds via transferFrom(strategy, vault, amt).
@@ -138,7 +138,7 @@ contract AquaStrategy is IStrategy, AccessManaged {
     /// @dev Returns ids for strategy- and aToken-level caps.
     function _ids() internal view returns (bytes32[] memory ids_) {
         ids_ = new bytes32[](2);
-        ids_[0] = adapterId;
+        ids_[0] = strategyId;
         ids_[1] = keccak256(abi.encode("aToken", aToken));
     }
 }
