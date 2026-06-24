@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2025 Morpho Association
+// Copyright (c) 2026 Ontorium
+//
+// Modified by Ontorium in 2026.
 pragma solidity ^0.8.28;
 
 library EventsLib {
@@ -16,18 +19,23 @@ library EventsLib {
     event Withdraw(
         address indexed sender, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares
     );
-    event WithdrawalRequested(
-        uint256 indexed requestId,
-        address indexed sender,
-        address indexed receiver,
-        address onBehalf,
-        uint256 assets,
-        uint256 shares
-    );
-    event WithdrawalClaimed(uint256 indexed requestId, address indexed receiver, uint256 assets);
+    /// @dev Per-user accumulating queue (Centrifuge-style). No `requestId`: identity is the
+    /// `onBehalf` address; multiple queued requests for the same user merge into one slot.
+    event WithdrawalRequested(address indexed sender, address indexed onBehalf, uint256 assets, uint256 shares);
+    /// @dev Operator (ALLOCATOR_ROLE) moved a user's pending request into the reserved/claimable pool.
+    event WithdrawalFulfilled(address indexed onBehalf, uint256 assets);
+    event WithdrawalClaimed(address indexed onBehalf, uint256 assets);
 
     // Vault creation events
     event Constructor(address indexed owner, address indexed asset);
+
+    // RoleManager events (membership changes are emitted as RoleGranted/RoleRevoked by AccessControl)
+    /// @dev Emitted when a scope's GOVERNANCE→operational admin hierarchy is wired in the RoleManager.
+    event RegisterScope(address indexed scope);
+
+    // Pause events
+    event Paused(address indexed sender);
+    event Unpaused(address indexed sender);
 
     // Allocation events
     event Allocate(address indexed sender, address indexed strategy, uint256 assets, bytes32[] ids, int256 change);
@@ -46,18 +54,16 @@ library EventsLib {
         uint256 previousTotalAssets, uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares
     );
 
-    // Timelock events
-    event Revoke(address indexed sender, bytes4 indexed selector, bytes data);
-    event Submit(bytes4 indexed selector, bytes data, uint256 executableAt);
-    event Accept(bytes4 indexed selector, bytes data);
+    // Governance timelock events
+    event GovernanceRevoke(address indexed sender, address indexed target, bytes4 indexed selector, bytes data);
+    event GovernanceSubmit(address indexed target, bytes4 indexed selector, bytes data, uint256 executableAt);
+    event GovernanceAccept(address indexed target, bytes4 indexed selector, bytes data);
 
     // Configuration events
-    event SetOwner(address indexed newOwner);
-    event SetCurator(address indexed newCurator);
-    event SetIsSentinel(address indexed account, bool newIsSentinel);
+    // @dev Owner/curator/sentinel/allocator membership changes are emitted by RoleManager
+    // as RoleGranted/RoleRevoked, NOT here.
     event SetName(string newName);
     event SetSymbol(string newSymbol);
-    event SetIsAllocator(address indexed account, bool newIsAllocator);
     event SetReceiveSharesGate(address indexed newReceiveSharesGate);
     event SetSendSharesGate(address indexed newSendSharesGate);
     event SetReceiveAssetsGate(address indexed newReceiveAssetsGate);
@@ -65,18 +71,54 @@ library EventsLib {
     event SetStrategyRegistry(address indexed newStrategyRegistry);
     event AddStrategy(address indexed account);
     event RemoveStrategy(address indexed account);
-    event DecreaseTimelock(bytes4 indexed selector, uint256 newDuration);
-    event IncreaseTimelock(bytes4 indexed selector, uint256 newDuration);
-    event Abdicate(bytes4 indexed selector);
+    event SetGovernanceTarget(address indexed target, bool allowed);
+    event SetTimelock(address indexed target, bytes4 indexed selector, uint256 newDuration);
+    event SetGovernanceAbdicated(address indexed target, bytes4 indexed selector, bool newAbdicated);
 
     event SetPerformanceFee(uint256 newPerformanceFee);
     event SetPerformanceFeeRecipient(address indexed newPerformanceFeeRecipient);
     event SetManagementFee(uint256 newManagementFee);
     event SetManagementFeeRecipient(address indexed newManagementFeeRecipient);
+    event SetDepositFee(uint256 newDepositFee);
+    event SetWithdrawalFee(uint256 newWithdrawalFee);
+    event SetProtocolFeeRecipient(address indexed newProtocolFeeRecipient);
+    event SetMinReportInterval(uint256 newMinReportInterval);
     event DecreaseAbsoluteCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newAbsoluteCap);
     event IncreaseAbsoluteCap(bytes32 indexed id, bytes idData, uint256 newAbsoluteCap);
     event DecreaseRelativeCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newRelativeCap);
     event IncreaseRelativeCap(bytes32 indexed id, bytes idData, uint256 newRelativeCap);
     event SetMaxRate(uint256 newMaxRate);
     event SetForceDeallocatePenalty(address indexed strategy, uint256 forceDeallocatePenalty);
+    event ForceSyncReportedNAV(address indexed caller, uint256 previousTotalAssets, uint256 newTotalAssets);
+
+    // StrategyManager-related events
+    event SetStrategyManager(address indexed newStrategyManager);
+    event SetStrategyActive(address indexed strategy, bool active);
+    event SetStrategyTargetBps(address indexed strategy, uint256 targetBps);
+    event SetStrategyKind(address indexed strategy, uint8 kind);
+    event AfterAllocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);
+    event AfterDeallocate(address indexed strategy, bytes32[] ids, int256 change, uint256 strategyAllocation);
+    event Rebalance(address indexed caller, uint256 actionsLength);
+
+    // OffchainBalanceSheet events (emitted from the strategy contract address)
+    event StrategyAllocated(uint256 assets);
+    event StrategyDeallocated(uint256 assets);
+    event CapitalDeployed(uint256 assets, address indexed destination);
+    event ReturnRequested(uint256 assets);
+    event CapitalReturned(uint256 assets);
+    event NAVReported(
+        uint256 reportedAssets,
+        uint256 reportedAvailableLiquidity,
+        uint256 pendingReceivable,
+        bytes32 indexed reportHash,
+        string reportURI,
+        uint64 timestamp
+    );
+    event StalePeriodSet(uint256 stalePeriod);
+
+    // OffchainNAVStrategy config events
+    // @dev Manager/reporter changes are emitted by RoleManager as RoleGranted/RoleRevoked
+    // (using per-strategy scoped role hashes), NOT here.
+    event SetCustodian(address indexed custodian);
+    event SetMaxChangeBps(uint256 maxChangeBps);
 }

@@ -1,0 +1,421 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (c) 2026 Ontorium
+pragma solidity ^0.8.28;
+
+import "./BaseTest.sol";
+import {AquaStrategy} from "../src/strategies/AquaStrategy.sol";
+import {AaveLendingPoolMock, ATokenMock} from "./mocks/AaveV2Mock.sol";
+
+/// @notice AquaStrategy is the Aave V2 wrapper: allocate() supplies underlying to the lending pool
+/// and receives rebasing aTokens; totalAssets() reads the aToken balance. These tests verify the
+/// aToken receipt, interest growth, withdrawal, liquidity capping, and access control — both
+/// standalone (pranking as the vault) and end-to-end through the real Vault.
+contract AquaStrategyTest is BaseTest {
+    AquaStrategy internal strategy;
+    AaveLendingPoolMock internal pool;
+    ATokenMock internal aToken;
+
+    function setUp() public override {
+        super.setUp();
+
+        pool = new AaveLendingPoolMock(address(underlyingToken));
+        aToken = new ATokenMock(address(pool), address(underlyingToken));
+        pool.setAToken(address(aToken));
+
+        // Strategy's vault is the real BaseTest vault, so we can drive both unit (prank) and
+        // integration (vault.allocate) paths against one instance.
+        strategy = new AquaStrategy(
+            address(vault), address(underlyingToken), address(pool), address(aToken), address(roleManager)
+        );
+    }
+
+    /// @dev ids[0] = strategyId (per-instance), ids[1] = per-aToken grouping. Matches AquaStrategy._ids().
+    function _expectedStrategyId() internal view returns (bytes32) {
+        return keccak256(abi.encode("AquaStrategy", address(strategy)));
+    }
+
+    function _expectedATokenId() internal view returns (bytes32) {
+        return keccak256(abi.encode("aToken", address(aToken)));
+    }
+
+    /// @dev Funds the strategy directly (mimicking the Vault transferring assets before allocate).
+    function _fundAndAllocateAs(uint256 amount) internal returns (bytes32[] memory ids, int256 change) {
+        underlyingToken.mint(address(strategy), amount);
+        vm.prank(address(vault));
+        (ids, change) = strategy.allocate(hex"", amount, bytes4(0), address(0));
+    }
+
+    /* ── CONSTRUCTOR ──────────────────────────────────────────────────────────── */
+
+    function testConstructorWiresAndApproves() public view {
+        assertEq(strategy.vault(), address(vault));
+        assertEq(strategy.asset(), address(underlyingToken));
+        assertEq(strategy.lendingPool(), address(pool));
+        assertEq(strategy.aToken(), address(aToken));
+        // Constructor pre-approved the pool to pull the asset.
+        assertEq(underlyingToken.allowance(address(strategy), address(pool)), type(uint256).max);
+    }
+
+    function testConstructorRejectsZeroAddresses() public {
+        // AccessManaged constructor rejects roleScope (_vault) == 0 before any other check.
+        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
+        new AquaStrategy(address(0), address(underlyingToken), address(pool), address(aToken), address(roleManager));
+
+        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
+        new AquaStrategy(address(vault), address(0), address(pool), address(aToken), address(roleManager));
+
+        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
+        new AquaStrategy(address(vault), address(underlyingToken), address(0), address(aToken), address(roleManager));
+
+        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
+        new AquaStrategy(address(vault), address(underlyingToken), address(pool), address(0), address(roleManager));
+
+        vm.expectRevert(ErrorsLib.ZeroAddress.selector);
+        new AquaStrategy(address(vault), address(underlyingToken), address(pool), address(aToken), address(0));
+    }
+
+    /* ── ALLOCATE → aToken RECEIPT ────────────────────────────────────────────── */
+
+    function testAllocateReceivesATokens(uint256 amount) public {
+        amount = bound(amount, 1, 1e30);
+
+        (bytes32[] memory ids, int256 change) = _fundAndAllocateAs(amount);
+
+        // The strategy now holds aTokens equal to the supplied principal.
+        assertEq(aToken.balanceOf(address(strategy)), amount, "aToken minted to strategy");
+        // Underlying moved out of the strategy into the aToken market.
+        assertEq(underlyingToken.balanceOf(address(strategy)), 0, "strategy underlying drained");
+        assertEq(underlyingToken.balanceOf(address(aToken)), amount, "market holds underlying");
+        // totalAssets mirrors the aToken balance.
+        assertEq(strategy.totalAssets(), amount, "totalAssets == aToken balance");
+
+        // Return values: 2-level ids (strategy / aToken), change = +amount.
+        assertEq(ids.length, 2);
+        assertEq(ids[0], _expectedStrategyId(), "id[0] = strategy");
+        assertEq(ids[1], _expectedATokenId(), "id[1] = aToken group");
+        assertEq(change, int256(amount), "change");
+    }
+
+    function testAllocateZeroIsNoopButReturnsId() public {
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = strategy.allocate(hex"", 0, bytes4(0), address(0));
+
+        assertEq(aToken.balanceOf(address(strategy)), 0, "no aTokens");
+        assertEq(ids.length, 2);
+        assertEq(ids[0], _expectedStrategyId());
+        assertEq(ids[1], _expectedATokenId());
+        assertEq(change, 0);
+    }
+
+    function testAllocateOnlyVault(address rdm) public {
+        vm.assume(rdm != address(vault));
+        underlyingToken.mint(address(strategy), 100);
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.allocate(hex"", 100, bytes4(0), address(0));
+    }
+
+    /* ── INTEREST (rebasing aToken) ───────────────────────────────────────────── */
+
+    function testTotalAssetsGrowsWithATokenInterest(uint256 principal, uint256 interest) public {
+        principal = bound(principal, 1e6, 1e30);
+        interest = bound(interest, 0, 1e30);
+
+        _fundAndAllocateAs(principal);
+        assertEq(strategy.totalAssets(), principal);
+
+        // Simulate Aave interest: the strategy's aToken balance rebases upward.
+        aToken.accrue(address(strategy), interest);
+
+        assertEq(strategy.totalAssets(), principal + interest, "interest reflected");
+    }
+
+    /* ── DEALLOCATE → underlying returned ─────────────────────────────────────── */
+
+    function testDeallocateBurnsATokensAndReturnsUnderlying(uint256 amount, uint256 withdrawAmt) public {
+        amount = bound(amount, 1, 1e30);
+        withdrawAmt = bound(withdrawAmt, 0, amount);
+
+        _fundAndAllocateAs(amount);
+
+        vm.prank(address(vault));
+        (bytes32[] memory ids, int256 change) = strategy.deallocate(hex"", withdrawAmt, bytes4(0), address(0));
+
+        assertEq(aToken.balanceOf(address(strategy)), amount - withdrawAmt, "aToken burned");
+        // Underlying flows back to the strategy (vault then pulls it via safeTransferFrom).
+        assertEq(underlyingToken.balanceOf(address(strategy)), withdrawAmt, "underlying returned");
+        assertEq(ids.length, 2);
+        assertEq(ids[0], _expectedStrategyId());
+        assertEq(ids[1], _expectedATokenId());
+        assertEq(change, -int256(withdrawAmt), "change negative");
+    }
+
+    function testDeallocateRevertsOnShortfall() public {
+        uint256 amount = 1_000e18;
+        _fundAndAllocateAs(amount);
+
+        // Pool will under-deliver by 1 wei on the next withdraw.
+        pool.setWithdrawShortfall(1);
+
+        vm.prank(address(vault));
+        vm.expectRevert(ErrorsLib.InsufficientLiquidity.selector);
+        strategy.deallocate(hex"", 500e18, bytes4(0), address(0));
+    }
+
+    function testDeallocateOnlyVault(address rdm) public {
+        vm.assume(rdm != address(vault));
+        _fundAndAllocateAs(100);
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.deallocate(hex"", 100, bytes4(0), address(0));
+    }
+
+    /* ── availableLiquidity capping ───────────────────────────────────────────── */
+
+    function testAvailableLiquidityFullWhenMarketLiquid(uint256 amount) public {
+        amount = bound(amount, 1, 1e30);
+        _fundAndAllocateAs(amount);
+        // Market holds all underlying → liquidity == totalAssets.
+        assertEq(strategy.availableLiquidity(), amount);
+    }
+
+    function testAvailableLiquidityCapsAtMarketLiquidity() public {
+        uint256 amount = 1_000e18;
+        _fundAndAllocateAs(amount);
+
+        // Simulate utilization: 700 of the market's underlying is "borrowed out".
+        underlyingToken.burn(address(aToken), 700e18);
+
+        // totalAssets still 1000 (aToken balance unchanged), but only 300 underlying remains.
+        assertEq(strategy.totalAssets(), 1_000e18);
+        assertEq(strategy.availableLiquidity(), 300e18, "capped at market liquidity");
+    }
+
+    /* ── INTEGRATION via real Vault ───────────────────────────────────────────── */
+
+    /// forge-config: default.isolate = true
+    function testVaultAllocateRoutesToAaveAndReceivesATokens() public {
+        // Register the strategy and lift the cap for BOTH ids it emits (strategy + aToken group).
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
+        vm.startPrank(governance);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        strategyManager.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(strategyIdData, WAD);
+        strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(aTokenIdData, WAD);
+        vm.stopPrank();
+
+        // A user deposits, then the allocator routes the principal into Aave.
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+
+        // aTokens received by the strategy; StrategyManager sees the assets.
+        assertEq(aToken.balanceOf(address(strategy)), deposit, "strategy holds aTokens");
+        assertEq(strategyManager.totalStrategyAssets(), deposit, "SM aggregates aToken value");
+        assertEq(strategyManager.allocation(_expectedStrategyId()), deposit, "strategy cap allocation tracked");
+        assertEq(strategyManager.allocation(_expectedATokenId()), deposit, "aToken cap allocation tracked");
+
+        // Interest accrues in Aave; the vault's totalAssets picks it up (within maxRate).
+        vm.prank(governance);
+        vault.setMaxRate(MAX_MAX_RATE);
+        aToken.accrue(address(strategy), 100e18);
+        skip(365 days);
+        assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault sees Aave interest");
+    }
+
+    /// @notice End-to-end: aToken interest accrued in Aave lifts the vault share price, so existing share
+    /// holders can redeem MORE underlying than they deposited. Confirms interest flows aToken → strategy
+    /// totalAssets → vault totalAssets → per-share value (capped by maxRate).
+    /// forge-config: default.isolate = true
+    function testATokenInterestRaisesVaultSharePrice() public {
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
+        vm.startPrank(governance);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        strategyManager.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(strategyIdData, WAD);
+        strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(aTokenIdData, WAD);
+        vault.setMaxRate(MAX_MAX_RATE); // allow the share price to grow with real yield
+        vm.stopPrank();
+
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        uint256 shares = vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+
+        // Baseline: one share is worth ~1 underlying right after deposit.
+        uint256 assetsPerShareBefore = vault.convertToAssets(shares);
+        assertApproxEqAbs(assetsPerShareBefore, deposit, 1, "baseline ~1:1");
+
+        // Aave pays 10% interest over a year; the rebasing aToken grows the strategy's balance.
+        aToken.accrue(address(strategy), 100e18);
+        skip(365 days);
+        vault.accrueInterest();
+
+        // Share price rose: the same shares now redeem ~1100 underlying.
+        uint256 assetsPerShareAfter = vault.convertToAssets(shares);
+        assertGt(assetsPerShareAfter, assetsPerShareBefore, "share price increased");
+        assertApproxEqAbs(assetsPerShareAfter, deposit + 100e18, 2, "interest reflected in share value");
+        assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault totalAssets grew by interest");
+    }
+
+    /* ── writeOff (phantom asset NAV reduction) ───────────────────────────────── */
+
+    /// @notice writeOff(amount) subtracts from totalAssets() and is monotonic — multiple calls
+    /// accumulate but never decrease. Mirrors burnShares semantics for non-per-market protocols.
+    function testWriteOffReducesTotalAssets() public {
+        _fundAndAllocateAs(1_000e18);
+        assertEq(strategy.totalAssets(), 1_000e18, "baseline");
+
+        vm.prank(governance);
+        strategy.writeOff(300e18);
+
+        assertEq(strategy.writtenOff(), 300e18);
+        assertEq(strategy.totalAssets(), 700e18, "writeOff applied");
+    }
+
+    function testWriteOffIsMonotonicallyAccumulating() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.startPrank(governance);
+        strategy.writeOff(200e18);
+        strategy.writeOff(150e18);
+        vm.stopPrank();
+
+        assertEq(strategy.writtenOff(), 350e18, "two writeOffs sum");
+        assertEq(strategy.totalAssets(), 650e18);
+    }
+
+    function testWriteOffCannotExceedAToken() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(governance);
+        vm.expectRevert(AquaStrategy.WriteOffExceedsBalance.selector);
+        strategy.writeOff(1_001e18);
+    }
+
+    function testWriteOffOnlyGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.writeOff(100e18);
+    }
+
+    function testWriteOffAvailableLiquidityFollowsTotal() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(governance);
+        strategy.writeOff(400e18);
+
+        // availableLiquidity = min(poolLiquidity, totalAssets) → capped by post-writeOff total.
+        assertEq(strategy.availableLiquidity(), 600e18, "available follows total");
+    }
+
+    /// @notice Edge: a full writeOff (== aToken balance) collapses totalAssets to 0; subsequent Aave
+    /// interest accrual brings the position back above the written-off floor, restoring NAV
+    /// proportionally. Verifies the `raw > wo ? raw - wo : 0` branch.
+    function testWriteOffThenInterestRecoversProportionally() public {
+        _fundAndAllocateAs(1_000e18);
+
+        vm.prank(governance);
+        strategy.writeOff(1_000e18);
+        assertEq(strategy.totalAssets(), 0, "fully written off to 0");
+
+        // Aave interest grows the aToken balance past the floor.
+        aToken.accrue(address(strategy), 250e18);
+        assertEq(strategy.totalAssets(), 250e18, "post-floor interest surfaces in NAV");
+    }
+
+    /* ── skim (defensive token recovery) ──────────────────────────────────────── */
+
+    /// @notice skim sweeps an arbitrary non-protected token to skimRecipient. Common use: stkAAVE
+    /// reward drops or mistakenly-sent tokens.
+    function testSkimRecoversNonProtectedToken() public {
+        address recipient = makeAddr("skimRecipient");
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 500e18);
+
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        vm.prank(recipient);
+        strategy.skim(address(rewardToken));
+
+        assertEq(rewardToken.balanceOf(recipient), 500e18, "recipient got reward");
+        assertEq(rewardToken.balanceOf(address(strategy)), 0, "strategy drained");
+    }
+
+    /// @notice The strategy's `asset` (underlying) is protected — skim cannot drain NAV backing.
+    function testSkimRevertsOnUnderlying() public {
+        address recipient = makeAddr("skimRecipient");
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        underlyingToken.mint(address(strategy), 100e18);
+
+        vm.prank(recipient);
+        vm.expectRevert(AquaStrategy.CannotSkimUnderlying.selector);
+        strategy.skim(address(underlyingToken));
+    }
+
+    /// @notice The aToken is protected — skim cannot drain the supply position.
+    function testSkimRevertsOnAToken() public {
+        address recipient = makeAddr("skimRecipient");
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        _fundAndAllocateAs(100e18);
+
+        vm.prank(recipient);
+        vm.expectRevert(AquaStrategy.CannotSkimAToken.selector);
+        strategy.skim(address(aToken));
+    }
+
+    function testSkimOnlyRecipientCanCall(address rdm) public {
+        address recipient = makeAddr("skimRecipient");
+        vm.assume(rdm != recipient);
+        vm.prank(governance);
+        strategy.setSkimRecipient(recipient);
+
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 100e18);
+
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.skim(address(rewardToken));
+    }
+
+    function testSkimRevertsWhenRecipientUnset() public {
+        ERC20Mock rewardToken = new ERC20Mock(18);
+        rewardToken.mint(address(strategy), 100e18);
+
+        // Default skimRecipient is address(0).
+        vm.expectRevert(AquaStrategy.SkimRecipientUnset.selector);
+        strategy.skim(address(rewardToken));
+    }
+
+    function testSetSkimRecipientOnlyGovernance(address rdm) public {
+        vm.assume(rdm != governance && rdm != address(timelock));
+        vm.prank(rdm);
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        strategy.setSkimRecipient(makeAddr("anyone"));
+    }
+}

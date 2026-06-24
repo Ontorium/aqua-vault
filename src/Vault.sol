@@ -6,21 +6,27 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IVault, Caps, WithdrawalRequest} from "./interfaces/IVault.sol";
+import {IVault, PendingWithdrawal, RebalanceAction} from "./interfaces/IVault.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
-import {IStrategyRegistry} from "./interfaces/IStrategyRegistry.sol";
-
+import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
+import {AccessManaged} from "./AccessManaged.sol";
+import {RoleManager} from "./RoleManager.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
 import {EventsLib} from "./libraries/EventsLib.sol";
-import "./libraries/ConstantsLib.sol"; // forge-lint: disable-line(unaliased-plain-import)
+import "./libraries/ConstantsLib.sol";
 import {MathLib} from "./libraries/MathLib.sol";
 import {SafeERC20Lib} from "./libraries/SafeERC20Lib.sol";
 import {IReceiveSharesGate, ISendSharesGate, IReceiveAssetsGate, ISendAssetsGate} from "./interfaces/IGate.sol";
 
-contract Vault is IVault {
+contract Vault is IVault, AccessManaged {
     using MathLib for uint256;
     using MathLib for uint128;
     using MathLib for int256;
+
+    struct ClaimableWithdrawal {
+        uint128 assets;
+        uint64 fee;
+    }
 
     /* IMMUTABLE */
 
@@ -28,17 +34,13 @@ contract Vault is IVault {
     uint8 public immutable decimals;
     uint256 public immutable virtualShares;
 
-    /* ROLES STORAGE */
+    /* WIRING STORAGE */
 
-    address public owner;
-    address public curator;
     address public receiveSharesGate;
     address public sendSharesGate;
     address public receiveAssetsGate;
     address public sendAssetsGate;
-    address public strategyRegistry;
-    mapping(address account => bool) public isSentinel;
-    mapping(address account => bool) public isAllocator;
+    address public strategyManager;
 
     /* TOKEN STORAGE */
 
@@ -56,18 +58,9 @@ contract Vault is IVault {
     uint64 public lastUpdate;
     uint64 public maxRate;
 
-    /* CURATION STORAGE */
+    /* STRATEGY STORAGE */
 
-    mapping(address account => bool) public isStrategy;
-    address[] public strategys;
-    mapping(bytes32 id => Caps) internal caps;
-    mapping(address strategy => uint256) public forceDeallocatePenalty;
-
-    /* TIMELOCKS STORAGE */
-
-    mapping(bytes4 selector => uint256) public timelock;
-    mapping(bytes4 selector => bool) public abdicated;
-    mapping(bytes data => uint256) public executableAt;
+    /// @dev Strategy configuration and cap accounting live in StrategyManager.
 
     /* FEES STORAGE */
 
@@ -75,24 +68,49 @@ contract Vault is IVault {
     address public performanceFeeRecipient;
     uint96 public managementFee;
     address public managementFeeRecipient;
+    /// @dev Deposit fee in WAD units.
+    uint96 public depositFee;
+    /// @dev Withdrawal fee in WAD units.
+    uint96 public withdrawalFee;
+    /// @dev Recipient for deposit and withdrawal fees.
+    address public protocolFeeRecipient;
 
     /* WITHDRAWAL QUEUE STORAGE */
 
-    mapping(uint256 requestId => WithdrawalRequest) public withdrawalRequests;
-    uint256 public nextRequestId;
-    /// @dev Assets earmarked for unclaimed withdrawal requests. Subtracted from idle balance when
-    /// computing liquidity available for immediate withdrawals and from realAssets in interest accrual.
+    /// @dev Per-user withdrawal queue entry.
+    mapping(address onBehalf => PendingWithdrawal) public pendingWithdrawal;
+    /// @dev Assets and fee snapshots reserved for fulfilled withdrawals.
+    mapping(address onBehalf => ClaimableWithdrawal) internal _claimableWithdrawal;
+    /// @dev Total assets reserved for fulfilled withdrawals.
+    uint256 public reservedAssets;
+    /// @dev Total assets owed to queued or fulfilled withdrawals.
     uint256 public pendingClaimableAssets;
+
+    /* PAUSE STORAGE */
+
+    /// @dev When true, deposits and allocations are paused.
+    bool public paused;
+
+    modifier whenNotPaused() {
+        require(!paused, ErrorsLib.Paused());
+        _;
+    }
 
     /* GETTERS */
 
-    function strategysLength() external view returns (uint256) {
-        return strategys.length;
-    }
+    /// @dev Strategy views are exposed through StrategyManager.
 
     function totalAssets() external view returns (uint256) {
         (uint256 newTotalAssets,,) = accrueInterestView();
         return newTotalAssets;
+    }
+
+    function claimableAssets(address onBehalf) external view returns (uint128) {
+        return _claimableWithdrawal[onBehalf].assets;
+    }
+
+    function claimableFee(address onBehalf) external view returns (uint64) {
+        return _claimableWithdrawal[onBehalf].fee;
     }
 
     /// forge-lint: disable-next-item(mixed-case-function)
@@ -100,220 +118,82 @@ contract Vault is IVault {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, block.chainid, address(this)));
     }
 
-    function absoluteCap(bytes32 id) external view returns (uint256) {
-        return caps[id].absoluteCap;
-    }
-
-    function relativeCap(bytes32 id) external view returns (uint256) {
-        return caps[id].relativeCap;
-    }
-
-    function allocation(bytes32 id) external view returns (uint256) {
-        return caps[id].allocation;
-    }
-
     /* MULTICALL */
 
-    /// @dev Useful for EOAs to batch admin calls.
-    /// @dev Does not return anything, because accounts who would use the return data would be contracts, which can do
-    /// the multicall themselves.
+    /// @dev Convenience helper for batching vault calls.
     function multicall(bytes[] calldata data) external {
-        for (uint256 i = 0; i < data.length; i++) {
+        uint256 len = data.length;
+        for (uint256 i; i < len;) {
             (bool success, bytes memory returnData) = address(this).delegatecall(data[i]);
             if (!success) {
                 assembly ("memory-safe") {
                     revert(add(32, returnData), mload(returnData))
                 }
             }
+            unchecked {
+                ++i;
+            }
         }
     }
 
     /* CONSTRUCTOR */
 
-    constructor(address _owner, address _asset) {
+    constructor(address _roleManager, address _asset) AccessManaged(_roleManager, address(this)) {
         asset = _asset;
-        owner = _owner;
         lastUpdate = uint64(block.timestamp);
         uint256 assetDecimals = IERC20(_asset).decimals();
         uint256 decimalOffset = uint256(18).zeroFloorSub(assetDecimals);
         // forge-lint: disable-next-item(unsafe-typecast) safe because assetDecimals + decimalOffset <= 18.
         decimals = uint8(assetDecimals + decimalOffset);
         virtualShares = 10 ** decimalOffset;
-        emit EventsLib.Constructor(_owner, _asset);
+        emit EventsLib.Constructor(_roleManager, _asset);
     }
 
-    /* OWNER FUNCTIONS */
+    /* GOVERNANCE FUNCTIONS (gated by RoleManager) */
 
-    function setOwner(address newOwner) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        owner = newOwner;
-        emit EventsLib.SetOwner(newOwner);
-    }
-
-    function setCurator(address newCurator) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        curator = newCurator;
-        emit EventsLib.SetCurator(newCurator);
-    }
-
-    function setIsSentinel(address account, bool newIsSentinel) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
-        isSentinel[account] = newIsSentinel;
-        emit EventsLib.SetIsSentinel(account, newIsSentinel);
-    }
-
-    function setName(string memory newName) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setName(string calldata newName) external onlyRole(GOVERNANCE_ROLE) {
         name = newName;
         emit EventsLib.SetName(newName);
     }
 
-    function setSymbol(string memory newSymbol) external {
-        require(msg.sender == owner, ErrorsLib.Unauthorized());
+    function setSymbol(string calldata newSymbol) external onlyRole(GOVERNANCE_ROLE) {
         symbol = newSymbol;
         emit EventsLib.SetSymbol(newSymbol);
     }
 
-    /* TIMELOCKS FOR CURATOR FUNCTIONS */
-
-    /// @dev Will revert if the timelock value is type(uint256).max or any value that overflows when added to the block
-    /// timestamp.
-    function submit(bytes calldata data) external {
-        require(msg.sender == curator, ErrorsLib.Unauthorized());
-        require(executableAt[data] == 0, ErrorsLib.DataAlreadyPending());
-
-        // forge-lint: disable-next-item(unsafe-typecast) we explicitly want only the first bytes4.
-        bytes4 selector = bytes4(data);
-        // forge-lint: disable-next-item(unsafe-typecast) we explicitly want only the second bytes4.
-        uint256 _timelock =
-            selector == IVault.decreaseTimelock.selector ? timelock[bytes4(data[4:8])] : timelock[selector];
-        executableAt[data] = block.timestamp + _timelock;
-        emit EventsLib.Submit(selector, data, executableAt[data]);
-    }
-
-    function timelocked() internal {
-        bytes4 selector = bytes4(msg.data);
-        require(executableAt[msg.data] != 0, ErrorsLib.DataNotTimelocked());
-        require(block.timestamp >= executableAt[msg.data], ErrorsLib.TimelockNotExpired());
-        require(!abdicated[selector], ErrorsLib.Abdicated());
-        executableAt[msg.data] = 0;
-        emit EventsLib.Accept(selector, msg.data);
-    }
-
-    function revoke(bytes calldata data) external {
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        require(executableAt[data] != 0, ErrorsLib.DataNotTimelocked());
-        executableAt[data] = 0;
-        // forge-lint: disable-next-item(unsafe-typecast) we explicitly want only the first bytes4.
-        bytes4 selector = bytes4(data);
-        emit EventsLib.Revoke(msg.sender, selector, data);
-    }
-
-    /* CURATOR FUNCTIONS */
-
-    function setIsAllocator(address account, bool newIsAllocator) external {
-        timelocked();
-        isAllocator[account] = newIsAllocator;
-        emit EventsLib.SetIsAllocator(account, newIsAllocator);
-    }
-
-    function setReceiveSharesGate(address newReceiveSharesGate) external {
-        timelocked();
+    function setReceiveSharesGate(address newReceiveSharesGate) external onlyRole(GOVERNANCE_ROLE) {
         receiveSharesGate = newReceiveSharesGate;
         emit EventsLib.SetReceiveSharesGate(newReceiveSharesGate);
     }
 
-    function setSendSharesGate(address newSendSharesGate) external {
-        timelocked();
+    function setSendSharesGate(address newSendSharesGate) external onlyRole(GOVERNANCE_ROLE) {
         sendSharesGate = newSendSharesGate;
         emit EventsLib.SetSendSharesGate(newSendSharesGate);
     }
 
-    function setReceiveAssetsGate(address newReceiveAssetsGate) external {
-        timelocked();
+    function setReceiveAssetsGate(address newReceiveAssetsGate) external onlyRole(GOVERNANCE_ROLE) {
         receiveAssetsGate = newReceiveAssetsGate;
         emit EventsLib.SetReceiveAssetsGate(newReceiveAssetsGate);
     }
 
-    function setSendAssetsGate(address newSendAssetsGate) external {
-        timelocked();
+    function setSendAssetsGate(address newSendAssetsGate) external onlyRole(GOVERNANCE_ROLE) {
         sendAssetsGate = newSendAssetsGate;
         emit EventsLib.SetSendAssetsGate(newSendAssetsGate);
     }
 
-    /// @dev The no-op will revert if the registry now returns false for an already added strategy.
-    function setStrategyRegistry(address newStrategyRegistry) external {
-        timelocked();
+    /// @dev One-time hook for wiring the vault's StrategyManager.
+    function setStrategyManager(address newStrategyManager) external onlyRole(GOVERNANCE_ROLE) {
+        require(strategyManager == address(0), ErrorsLib.InvalidStrategyManager());
+        require(newStrategyManager != address(0), ErrorsLib.ZeroAddress());
+        require(newStrategyManager.code.length != 0, ErrorsLib.NoCode());
+        require(IStrategyManager(newStrategyManager).vault() == address(this), ErrorsLib.InvalidStrategyManager());
+        require(IStrategyManager(newStrategyManager).asset() == asset, ErrorsLib.InvalidStrategyManager());
 
-        if (newStrategyRegistry != address(0)) {
-            for (uint256 i = 0; i < strategys.length; i++) {
-                require(
-                    IStrategyRegistry(newStrategyRegistry).isInRegistry(strategys[i]), ErrorsLib.NotInStrategyRegistry()
-                );
-            }
-        }
-
-        strategyRegistry = newStrategyRegistry;
-        emit EventsLib.SetStrategyRegistry(newStrategyRegistry);
+        strategyManager = newStrategyManager;
+        emit EventsLib.SetStrategyManager(newStrategyManager);
     }
 
-    function addStrategy(address account) external {
-        timelocked();
-        require(
-            strategyRegistry == address(0) || IStrategyRegistry(strategyRegistry).isInRegistry(account),
-            ErrorsLib.NotInStrategyRegistry()
-        );
-        if (!isStrategy[account]) {
-            strategys.push(account);
-            isStrategy[account] = true;
-        }
-        emit EventsLib.AddStrategy(account);
-    }
-
-    function removeStrategy(address account) external {
-        timelocked();
-        if (isStrategy[account]) {
-            for (uint256 i = 0; i < strategys.length; i++) {
-                if (strategys[i] == account) {
-                    strategys[i] = strategys[strategys.length - 1];
-                    strategys.pop();
-                    break;
-                }
-            }
-            isStrategy[account] = false;
-        }
-        emit EventsLib.RemoveStrategy(account);
-    }
-
-    /// @dev This function requires great caution because it can irreversibly disable submit for a selector.
-    /// @dev Existing pending operations submitted before increasing a timelock can still be executed at the initial
-    /// executableAt.
-    function increaseTimelock(bytes4 selector, uint256 newDuration) external {
-        timelocked();
-        require(selector != IVault.decreaseTimelock.selector, ErrorsLib.AutomaticallyTimelocked());
-        require(newDuration >= timelock[selector], ErrorsLib.TimelockNotIncreasing());
-
-        timelock[selector] = newDuration;
-        emit EventsLib.IncreaseTimelock(selector, newDuration);
-    }
-
-    function decreaseTimelock(bytes4 selector, uint256 newDuration) external {
-        timelocked();
-        require(selector != IVault.decreaseTimelock.selector, ErrorsLib.AutomaticallyTimelocked());
-        require(newDuration <= timelock[selector], ErrorsLib.TimelockNotDecreasing());
-
-        timelock[selector] = newDuration;
-        emit EventsLib.DecreaseTimelock(selector, newDuration);
-    }
-
-    function abdicate(bytes4 selector) external {
-        timelocked();
-        abdicated[selector] = true;
-        emit EventsLib.Abdicate(selector);
-    }
-
-    function setPerformanceFee(uint256 newPerformanceFee) external {
-        timelocked();
+    function setPerformanceFee(uint256 newPerformanceFee) external onlyRole(GOVERNANCE_ROLE) {
         require(newPerformanceFee <= MAX_PERFORMANCE_FEE, ErrorsLib.FeeTooHigh());
         require(performanceFeeRecipient != address(0) || newPerformanceFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -324,8 +204,7 @@ contract Vault is IVault {
         emit EventsLib.SetPerformanceFee(newPerformanceFee);
     }
 
-    function setManagementFee(uint256 newManagementFee) external {
-        timelocked();
+    function setManagementFee(uint256 newManagementFee) external onlyRole(GOVERNANCE_ROLE) {
         require(newManagementFee <= MAX_MANAGEMENT_FEE, ErrorsLib.FeeTooHigh());
         require(managementFeeRecipient != address(0) || newManagementFee == 0, ErrorsLib.FeeInvariantBroken());
 
@@ -336,8 +215,7 @@ contract Vault is IVault {
         emit EventsLib.SetManagementFee(newManagementFee);
     }
 
-    function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external {
-        timelocked();
+    function setPerformanceFeeRecipient(address newPerformanceFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
         require(newPerformanceFeeRecipient != address(0) || performanceFee == 0, ErrorsLib.FeeInvariantBroken());
 
         accrueInterest();
@@ -346,8 +224,48 @@ contract Vault is IVault {
         emit EventsLib.SetPerformanceFeeRecipient(newPerformanceFeeRecipient);
     }
 
-    function setManagementFeeRecipient(address newManagementFeeRecipient) external {
-        timelocked();
+    /* PAUSE CONTROLS */
+
+    /// @notice Pauses deposits and allocations.
+    /// @dev Withdrawals remain available.
+    function pause() external onlyRole(SENTINEL_ROLE) {
+        paused = true;
+        emit EventsLib.Paused(msg.sender);
+    }
+
+    function unpause() external onlyRole(GOVERNANCE_ROLE) {
+        paused = false;
+        emit EventsLib.Unpaused(msg.sender);
+    }
+
+    function setDepositFee(uint256 newDepositFee) external onlyRole(GOVERNANCE_ROLE) {
+        require(newDepositFee <= MAX_DEPOSIT_FEE, ErrorsLib.FeeTooHigh());
+        require(protocolFeeRecipient != address(0) || newDepositFee == 0, ErrorsLib.FeeInvariantBroken());
+
+        // forge-lint: disable-next-item(unsafe-typecast) safe because 2**96 > MAX_DEPOSIT_FEE.
+        depositFee = uint96(newDepositFee);
+        emit EventsLib.SetDepositFee(newDepositFee);
+    }
+
+    function setWithdrawalFee(uint256 newWithdrawalFee) external onlyRole(GOVERNANCE_ROLE) {
+        require(newWithdrawalFee <= MAX_WITHDRAWAL_FEE, ErrorsLib.FeeTooHigh());
+        require(protocolFeeRecipient != address(0) || newWithdrawalFee == 0, ErrorsLib.FeeInvariantBroken());
+
+        // forge-lint: disable-next-item(unsafe-typecast) safe because 2**96 > MAX_WITHDRAWAL_FEE.
+        withdrawalFee = uint96(newWithdrawalFee);
+        emit EventsLib.SetWithdrawalFee(newWithdrawalFee);
+    }
+
+    function setProtocolFeeRecipient(address newProtocolFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
+        require(
+            newProtocolFeeRecipient != address(0) || (depositFee == 0 && withdrawalFee == 0),
+            ErrorsLib.FeeInvariantBroken()
+        );
+        protocolFeeRecipient = newProtocolFeeRecipient;
+        emit EventsLib.SetProtocolFeeRecipient(newProtocolFeeRecipient);
+    }
+
+    function setManagementFeeRecipient(address newManagementFeeRecipient) external onlyRole(GOVERNANCE_ROLE) {
         require(newManagementFeeRecipient != address(0) || managementFee == 0, ErrorsLib.FeeInvariantBroken());
 
         accrueInterest();
@@ -356,108 +274,80 @@ contract Vault is IVault {
         emit EventsLib.SetManagementFeeRecipient(newManagementFeeRecipient);
     }
 
-    function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external {
-        timelocked();
-        bytes32 id = keccak256(idData);
-        require(newAbsoluteCap >= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotIncreasing());
-
-        caps[id].absoluteCap = newAbsoluteCap.toUint128();
-        emit EventsLib.IncreaseAbsoluteCap(id, idData, newAbsoluteCap);
-    }
-
-    function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap) external {
-        bytes32 id = keccak256(idData);
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        require(newAbsoluteCap <= caps[id].absoluteCap, ErrorsLib.AbsoluteCapNotDecreasing());
-
-        // forge-lint: disable-next-item(unsafe-typecast) safe because newAbsoluteCap <= absoluteCap < 2**128.
-        caps[id].absoluteCap = uint128(newAbsoluteCap);
-        emit EventsLib.DecreaseAbsoluteCap(msg.sender, id, idData, newAbsoluteCap);
-    }
-
-    function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external {
-        timelocked();
-        bytes32 id = keccak256(idData);
-        require(newRelativeCap <= WAD, ErrorsLib.RelativeCapAboveOne());
-        require(newRelativeCap >= caps[id].relativeCap, ErrorsLib.RelativeCapNotIncreasing());
-
-        // forge-lint: disable-next-item(unsafe-typecast) safe because WAD < 2**128.
-        caps[id].relativeCap = uint128(newRelativeCap);
-        emit EventsLib.IncreaseRelativeCap(id, idData, newRelativeCap);
-    }
-
-    function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap) external {
-        bytes32 id = keccak256(idData);
-        require(msg.sender == curator || isSentinel[msg.sender], ErrorsLib.Unauthorized());
-        require(newRelativeCap <= caps[id].relativeCap, ErrorsLib.RelativeCapNotDecreasing());
-
-        // forge-lint: disable-next-item(unsafe-typecast) safe because WAD < 2**128.
-        caps[id].relativeCap = uint128(newRelativeCap);
-        emit EventsLib.DecreaseRelativeCap(msg.sender, id, idData, newRelativeCap);
-    }
-
-    function setForceDeallocatePenalty(address strategy, uint256 newForceDeallocatePenalty) external {
-        timelocked();
-        require(newForceDeallocatePenalty <= MAX_FORCE_DEALLOCATE_PENALTY, ErrorsLib.PenaltyTooHigh());
-        forceDeallocatePenalty[strategy] = newForceDeallocatePenalty;
-        emit EventsLib.SetForceDeallocatePenalty(strategy, newForceDeallocatePenalty);
-    }
-
     /* ALLOCATOR FUNCTIONS */
 
-    function allocate(address strategy, bytes memory data, uint256 assets) external {
-        require(isAllocator[msg.sender], ErrorsLib.Unauthorized());
+    function allocate(address strategy, bytes calldata data, uint256 assets)
+        external
+        whenNotPaused
+        onlyRole(ALLOCATOR_ROLE)
+    {
         allocateInternal(strategy, data, assets);
     }
 
-    function allocateInternal(address strategy, bytes memory data, uint256 assets) internal {
-        require(isStrategy[strategy], ErrorsLib.NotStrategy());
+    function allocateInternal(address strategy, bytes calldata data, uint256 assets) internal {
+        address _strategyManager = strategyManager;
+        require(_strategyManager != address(0), ErrorsLib.ZeroAddress());
 
         accrueInterest();
+
+        // Do not allocate assets reserved for fulfilled withdrawals.
+        require(
+            assets <= IERC20(asset).balanceOf(address(this)).zeroFloorSub(reservedAssets),
+            ErrorsLib.InsufficientLiquidity()
+        );
 
         SafeERC20Lib.safeTransfer(asset, strategy, assets);
         (bytes32[] memory ids, int256 change) = IStrategy(strategy).allocate(data, assets, msg.sig, msg.sender);
 
-        for (uint256 i; i < ids.length; i++) {
-            Caps storage _caps = caps[ids[i]];
-            _caps.allocation = (int256(_caps.allocation) + change).toUint256();
+        IStrategyManager(_strategyManager).onAllocate(strategy, ids, change, firstTotalAssets);
 
-            require(_caps.absoluteCap > 0, ErrorsLib.ZeroAbsoluteCap());
-            require(_caps.allocation <= _caps.absoluteCap, ErrorsLib.AbsoluteCapExceeded());
-            require(
-                _caps.relativeCap == WAD || _caps.allocation <= firstTotalAssets.mulDivDown(_caps.relativeCap, WAD),
-                ErrorsLib.RelativeCapExceeded()
-            );
-        }
         emit EventsLib.Allocate(msg.sender, strategy, assets, ids, change);
     }
 
-    function deallocate(address strategy, bytes memory data, uint256 assets) external {
-        require(isAllocator[msg.sender] || isSentinel[msg.sender], ErrorsLib.Unauthorized());
+    function deallocate(address strategy, bytes calldata data, uint256 assets) external {
+        _requireAnyRole(ALLOCATOR_ROLE, SENTINEL_ROLE);
         deallocateInternal(strategy, data, assets);
     }
 
-    function deallocateInternal(address strategy, bytes memory data, uint256 assets)
-        internal
-        returns (bytes32[] memory)
-    {
-        require(isStrategy[strategy], ErrorsLib.NotStrategy());
-
-        (bytes32[] memory ids, int256 change) = IStrategy(strategy).deallocate(data, assets, msg.sig, msg.sender);
-
-        for (uint256 i; i < ids.length; i++) {
-            Caps storage _caps = caps[ids[i]];
-            require(_caps.allocation > 0, ErrorsLib.ZeroAllocation());
-            _caps.allocation = (int256(_caps.allocation) + change).toUint256();
+    /// @notice Moves capital between strategies in a single batch (e.g. deallocate from one, allocate to
+    /// another). Reverts the whole batch if any leg fails, so no partial moves can occur.
+    /// @dev Allocate legs are blocked while paused (entry); deallocate legs (exit) stay available. Calling
+    /// allocateInternal/deallocateInternal directly means the per-leg role checks are skipped — the single
+    /// ALLOCATOR_ROLE gate here covers the whole batch.
+    function rebalance(RebalanceAction[] calldata actions) external onlyRole(ALLOCATOR_ROLE) {
+        uint256 len = actions.length;
+        for (uint256 i; i < len;) {
+            RebalanceAction calldata action = actions[i];
+            if (action.isAllocate) {
+                require(!paused, ErrorsLib.Paused());
+                allocateInternal(action.strategy, action.data, action.assets);
+            } else {
+                deallocateInternal(action.strategy, action.data, action.assets);
+            }
+            unchecked {
+                ++i;
+            }
         }
+        emit EventsLib.Rebalance(msg.sender, len);
+    }
+
+    function deallocateInternal(address strategy, bytes calldata data, uint256 assets)
+        internal
+        returns (bytes32[] memory ids)
+    {
+        address _strategyManager = strategyManager;
+        require(_strategyManager != address(0), ErrorsLib.ZeroAddress());
+
+        int256 change;
+        (ids, change) = IStrategy(strategy).deallocate(data, assets, msg.sig, msg.sender);
+
+        IStrategyManager(_strategyManager).onDeallocate(strategy, ids, change);
 
         SafeERC20Lib.safeTransferFrom(asset, strategy, address(this), assets);
         emit EventsLib.Deallocate(msg.sender, strategy, assets, ids, change);
-        return ids;
     }
 
-    function setMaxRate(uint256 newMaxRate) external {
-        require(isAllocator[msg.sender], ErrorsLib.Unauthorized());
+    function setMaxRate(uint256 newMaxRate) external onlyRole(GOVERNANCE_ROLE) {
         require(newMaxRate <= MAX_MAX_RATE, ErrorsLib.MaxRateTooHigh());
 
         accrueInterest();
@@ -471,6 +361,27 @@ contract Vault is IVault {
 
     function accrueInterest() public {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
+    }
+
+    /// @notice Deliberate, governance-only immediate NAV reflection that bypasses the maxRate cap.
+    /// @dev NOT a routine path. Routine NAV flows through `OffchainNAVStrategy.report()` and is
+    /// smoothed by maxRate via `accrueInterest`. This forces `_totalAssets` to the full real value in
+    /// one shot, removing the anti-jump guard — use only for trusted/authoritative marks or to correct
+    /// a stuck price. Gated by GOVERNANCE_ROLE (timelocked in production); emits a distinct event.
+    function forceSyncReportedNAV() external onlyRole(GOVERNANCE_ROLE) {
+        uint256 newTotalAssets = _realAssets();
+        uint256 previousTotalAssets = _totalAssets;
+        (uint256 performanceFeeShares, uint256 managementFeeShares) =
+            _previewFeeShares(previousTotalAssets, newTotalAssets, block.timestamp - lastUpdate);
+
+        _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
+        emit EventsLib.ForceSyncReportedNAV(msg.sender, previousTotalAssets, newTotalAssets);
+    }
+
+    function _applyAccruedTotalAssets(uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares)
+        internal
+    {
         emit EventsLib.AccrueInterest(_totalAssets, newTotalAssets, performanceFeeShares, managementFeeShares);
         _totalAssets = newTotalAssets.toUint128();
         if (firstTotalAssets == 0) firstTotalAssets = newTotalAssets;
@@ -479,155 +390,181 @@ contract Vault is IVault {
         lastUpdate = uint64(block.timestamp);
     }
 
-    /// @dev Returns newTotalAssets, performanceFeeShares, managementFeeShares.
-    /// @dev The management fee is not bound to the interest, so it can make the share price go down.
-    /// @dev The management fees is taken even if the vault incurs some losses.
-    /// @dev Both fees are rounded down, so fee recipients could receive less than expected.
-    /// @dev The performance fee is taken on the "distributed interest" (which differs from the "real interest" because
-    /// of the max rate).
+    /// @dev Returns accrued assets together with the fee shares to mint.
+    /// Management fees accrue regardless of profit and both fee paths round down.
     function accrueInterestView() public view returns (uint256, uint256, uint256) {
         if (firstTotalAssets != 0) return (_totalAssets, 0, 0);
         uint256 elapsed = block.timestamp - lastUpdate;
-        uint256 realAssets = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
-        for (uint256 i = 0; i < strategys.length; i++) {
-            realAssets += IStrategy(strategys[i]).realAssets();
-        }
+        uint256 realAssets = _realAssets();
         uint256 maxTotalAssets = _totalAssets + (_totalAssets * elapsed).mulDivDown(maxRate, WAD);
         uint256 newTotalAssets = MathLib.min(realAssets, maxTotalAssets);
-        uint256 interest = newTotalAssets.zeroFloorSub(_totalAssets);
+        (uint256 performanceFeeShares, uint256 managementFeeShares) =
+            _previewFeeShares(_totalAssets, newTotalAssets, elapsed);
+        return (newTotalAssets, performanceFeeShares, managementFeeShares);
+    }
 
-        // The performance fee assets may be rounded down to 0 if interest * fee < WAD.
+    function _previewFeeShares(uint256 previousTotalAssets, uint256 newTotalAssets, uint256 elapsed)
+        internal
+        view
+        returns (uint256 performanceFeeShares, uint256 managementFeeShares)
+    {
+        uint256 interest = newTotalAssets.zeroFloorSub(previousTotalAssets);
+
         uint256 performanceFeeAssets = interest > 0 && performanceFee > 0 && canReceiveShares(performanceFeeRecipient)
             ? interest.mulDivDown(performanceFee, WAD)
             : 0;
-        // The management fee is taken on newTotalAssets to make all approximations consistent (interacting less
-        // increases fees).
         uint256 managementFeeAssets = elapsed > 0 && managementFee > 0 && canReceiveShares(managementFeeRecipient)
             ? (newTotalAssets * elapsed).mulDivDown(managementFee, WAD)
             : 0;
 
-        // Interest should be accrued at least every 10 years to avoid fees exceeding total assets.
         uint256 newTotalAssetsWithoutFees = newTotalAssets - performanceFeeAssets - managementFeeAssets;
-        uint256 performanceFeeShares =
+        performanceFeeShares =
             performanceFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
-        uint256 managementFeeShares =
-            managementFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
-
-        return (newTotalAssets, performanceFeeShares, managementFeeShares);
+        managementFeeShares = managementFeeAssets.mulDivDown(totalSupply + virtualShares, newTotalAssetsWithoutFees + 1);
     }
 
-    /// @dev Returns previewed minted shares.
+    function _realAssets() internal view returns (uint256 realAssets) {
+        // Subtract pending claims — they no longer belong to share holders.
+        realAssets = IERC20(asset).balanceOf(address(this))
+            .zeroFloorSub(pendingClaimableAssets);
+        if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
+    }
+
+    /// @dev Returns the shares minted for `assets`, net of deposit fees.
     function previewDeposit(uint256 assets) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 netAssets = assets - assets.mulDivUp(depositFee, WAD);
+        return netAssets.mulDivDown(newTotalSupply + virtualShares, newTotalAssets + 1);
+    }
+
+    /// @dev Returns the gross assets required to mint `shares`.
+    function previewMint(uint256 shares) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 netAssets = shares.mulDivUp(newTotalAssets + 1, newTotalSupply + virtualShares);
+        return depositFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - depositFee);
+    }
+
+    /// @dev Returns the shares burned to withdraw `assets` after fees.
+    function previewWithdraw(uint256 assets) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 grossAssets = withdrawalFee == 0 ? assets : assets.mulDivUp(WAD, WAD - withdrawalFee);
+        return grossAssets.mulDivUp(newTotalSupply + virtualShares, newTotalAssets + 1);
+    }
+
+    /// @dev Returns the assets received when redeeming `shares`.
+    function previewRedeem(uint256 shares) public view returns (uint256) {
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 grossAssets = shares.mulDivDown(newTotalAssets + 1, newTotalSupply + virtualShares);
+        return grossAssets - grossAssets.mulDivUp(withdrawalFee, WAD);
+    }
+
+    /// @dev Returns the fee-agnostic share amount for `assets`.
+    function convertToShares(uint256 assets) external view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
         return assets.mulDivDown(newTotalSupply + virtualShares, newTotalAssets + 1);
     }
 
-    /// @dev Returns previewed deposited assets.
-    function previewMint(uint256 shares) public view returns (uint256) {
-        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
-        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
-        return shares.mulDivUp(newTotalAssets + 1, newTotalSupply + virtualShares);
-    }
-
-    /// @dev Returns previewed redeemed shares.
-    function previewWithdraw(uint256 assets) public view returns (uint256) {
-        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
-        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
-        return assets.mulDivUp(newTotalSupply + virtualShares, newTotalAssets + 1);
-    }
-
-    /// @dev Returns previewed withdrawn assets.
-    function previewRedeem(uint256 shares) public view returns (uint256) {
+    /// @dev Returns the fee-agnostic asset amount for `shares`.
+    function convertToAssets(uint256 shares) external view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
         uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
         return shares.mulDivDown(newTotalAssets + 1, newTotalSupply + virtualShares);
     }
 
-    /// @dev Returns corresponding shares (rounded down).
-    /// @dev Takes into account performance and management fees.
-    function convertToShares(uint256 assets) external view returns (uint256) {
-        return previewDeposit(assets);
-    }
-
-    /// @dev Returns corresponding assets (rounded down).
-    /// @dev Takes into account performance and management fees.
-    function convertToAssets(uint256 shares) external view returns (uint256) {
-        return previewRedeem(shares);
-    }
-
     /* MAX FUNCTIONS */
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxDeposit(address) external pure returns (uint256) {
         return 0;
     }
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxMint(address) external pure returns (uint256) {
         return 0;
     }
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxWithdraw(address) external pure returns (uint256) {
         return 0;
     }
 
-    /// @dev Gross underestimation because being revert-free cannot be guaranteed when calling the gate.
+    /// @dev Returns zero because gate checks are not guaranteed to be revert-free.
     function maxRedeem(address) external pure returns (uint256) {
         return 0;
     }
 
     /* USER MAIN FUNCTIONS */
 
-    /// @dev Returns minted shares.
-    function deposit(uint256 assets, address onBehalf) external returns (uint256) {
+    /// @dev Charges `depositFee` and mints shares against the net assets.
+    function deposit(uint256 assets, address onBehalf) external whenNotPaused returns (uint256) {
         accrueInterest();
         uint256 shares = previewDeposit(assets);
-        enter(assets, shares, onBehalf);
+        uint256 fee = assets.mulDivUp(depositFee, WAD);
+        uint256 netAssets = assets - fee;
+        _enter(assets, netAssets, fee, shares, onBehalf);
         return shares;
     }
 
-    /// @dev Returns deposited assets.
-    function mint(uint256 shares, address onBehalf) external returns (uint256) {
+    /// @dev Mints `shares` to `onBehalf` for the required gross assets.
+    function mint(uint256 shares, address onBehalf) external whenNotPaused returns (uint256) {
         accrueInterest();
-        uint256 assets = previewMint(shares);
-        enter(assets, shares, onBehalf);
-        return assets;
+        uint256 grossAssets = previewMint(shares);
+        uint256 fee = grossAssets.mulDivUp(depositFee, WAD);
+        uint256 netAssets = grossAssets - fee;
+        _enter(grossAssets, netAssets, fee, shares, onBehalf);
+        return grossAssets;
     }
 
-    /// @dev Internal function for deposit and mint.
-    function enter(uint256 assets, uint256 shares, address onBehalf) internal {
+    /// @dev Internal entry path for deposits and mints.
+    function _enter(uint256 assets, uint256 netAssets, uint256 fee, uint256 shares, address onBehalf) internal {
         require(canReceiveShares(onBehalf), ErrorsLib.CannotReceiveShares());
         require(canSendAssets(msg.sender), ErrorsLib.CannotSendAssets());
 
         SafeERC20Lib.safeTransferFrom(asset, msg.sender, address(this), assets);
+        if (fee > 0) {
+            require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
+            SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
+        }
         createShares(onBehalf, shares);
-        _totalAssets += assets.toUint128();
-        emit EventsLib.Deposit(msg.sender, onBehalf, assets, shares);
+        _totalAssets += netAssets.toUint128();
+        emit EventsLib.Deposit(msg.sender, onBehalf, netAssets, shares);
     }
 
-    /// @dev Returns redeemed shares.
+    /// @dev Withdraws `assets` net of fees to `receiver`.
     function withdraw(uint256 assets, address receiver, address onBehalf) public returns (uint256) {
         accrueInterest();
         uint256 shares = previewWithdraw(assets);
-        exit(assets, shares, receiver, onBehalf);
+        uint256 grossAssets = withdrawalFee == 0 ? assets : assets.mulDivUp(WAD, WAD - withdrawalFee);
+        uint256 fee = grossAssets - assets;
+        _exit(grossAssets, assets, fee, shares, receiver, onBehalf);
         return shares;
     }
 
-    /// @dev Returns withdrawn assets.
+    /// @dev Redeems `shares` from `onBehalf`.
     function redeem(uint256 shares, address receiver, address onBehalf) external returns (uint256) {
         accrueInterest();
-        uint256 assets = previewRedeem(shares);
-        exit(assets, shares, receiver, onBehalf);
-        return assets;
+        uint256 netAssets = previewRedeem(shares);
+        uint256 grossAssets = withdrawalFee == 0 ? netAssets : netAssets.mulDivUp(WAD, WAD - withdrawalFee);
+        uint256 fee = grossAssets - netAssets;
+        _exit(grossAssets, netAssets, fee, shares, receiver, onBehalf);
+        return netAssets;
     }
 
-    /// @dev Internal function for withdraw and redeem.
-    /// @dev If idle liquidity (vault balance minus assets reserved for unclaimed withdrawal requests) covers the
-    /// requested amount, assets are transferred immediately. Otherwise shares are burned now and a withdrawal request
-    /// is created for the user to claim once allocator returns enough assets to the vault.
-    function exit(uint256 assets, uint256 shares, address receiver, address onBehalf) internal {
+    /// @dev Internal exit path for withdrawals and redeems.
+    /// Uses the queue when idle liquidity is insufficient.
+    function _exit(
+        uint256 assetsOut,
+        uint256 netAssets,
+        uint256 fee,
+        uint256 shares,
+        address receiver,
+        address onBehalf
+    ) internal {
         require(canSendShares(onBehalf), ErrorsLib.CannotSendShares());
         require(canReceiveAssets(receiver), ErrorsLib.CannotReceiveAssets());
 
@@ -637,65 +574,202 @@ contract Vault is IVault {
         }
 
         deleteShares(onBehalf, shares);
-        _totalAssets -= assets.toUint128();
+        _totalAssets -= assetsOut.toUint128();
 
         uint256 idleAssets = IERC20(asset).balanceOf(address(this));
-        uint256 availableLiquidity = idleAssets.zeroFloorSub(pendingClaimableAssets);
+        uint256 effectiveIdle = idleAssets.zeroFloorSub(pendingClaimableAssets);
 
-        if (availableLiquidity >= assets) {
-            SafeERC20Lib.safeTransfer(asset, receiver, assets);
-            emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, assets, shares);
+        if (effectiveIdle >= assetsOut) {
+            // Immediate settlement.
+            if (fee > 0) {
+                require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
+                SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
+            }
+            SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
+            emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, netAssets, shares);
         } else {
-            uint256 requestId = nextRequestId++;
-            withdrawalRequests[requestId] = WithdrawalRequest({receiver: receiver, assets: assets, claimed: false});
-            pendingClaimableAssets += assets;
-            emit EventsLib.WithdrawalRequested(requestId, msg.sender, receiver, onBehalf, assets, shares);
+            // Queue settlement and snapshot the fee in effect for this request.
+            PendingWithdrawal storage p = pendingWithdrawal[onBehalf];
+            uint256 oldAssets = p.assets;
+            uint64 newFee = uint64(withdrawalFee);
+            if (oldAssets == 0) {
+                p.feeAtRequest = newFee;
+            } else if (newFee != p.feeAtRequest) {
+                // Weighted by assets.
+                p.feeAtRequest = uint64(
+                    (oldAssets * uint256(p.feeAtRequest) + assetsOut * uint256(newFee)) / (oldAssets + assetsOut)
+                );
+            }
+            p.assets = (oldAssets + assetsOut).toUint128();
+            p.shares = (uint256(p.shares) + shares).toUint128();
+            pendingClaimableAssets += assetsOut;
+            emit EventsLib.WithdrawalRequested(msg.sender, onBehalf, assetsOut, shares);
         }
     }
 
-    /// @dev Settles a withdrawal request once enough idle liquidity is available in the vault.
-    /// @dev Callable by anyone — assets are transferred to the receiver stored on the request.
-    /// @dev Reverts if the request is already claimed or if idle liquidity is insufficient.
-    function claim(uint256 requestId) external returns (uint256) {
-        WithdrawalRequest storage request = withdrawalRequests[requestId];
-        require(request.receiver != address(0), ErrorsLib.InvalidRequest());
-        require(!request.claimed, ErrorsLib.RequestAlreadyClaimed());
+    /// @notice Moves pending withdrawals into claimable balances.
+    /// @dev Requires enough unreserved idle liquidity for each request.
+    function fulfillWithdrawal(address[] calldata onBehalfs) external onlyRole(ALLOCATOR_ROLE) {
+        uint256 len = onBehalfs.length;
+        IERC20 assetToken = IERC20(asset);
+        uint256 balance = assetToken.balanceOf(address(this));
+        uint256 reserved = reservedAssets;
+        uint256 newReserved = reserved;
 
-        uint256 assets = request.assets;
-        require(IERC20(asset).balanceOf(address(this)) >= assets, ErrorsLib.InsufficientLiquidity());
+        for (uint256 i; i < len;) {
+            address onBehalf = onBehalfs[i];
+            PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
+            uint256 amt = p.assets;
+            require(amt > 0, ErrorsLib.RequestNotPending());
+            require(balance - newReserved >= amt, ErrorsLib.InsufficientLiquidity());
 
-        request.claimed = true;
-        pendingClaimableAssets -= assets;
+            newReserved += amt;
 
-        address receiver = request.receiver;
-        SafeERC20Lib.safeTransfer(asset, receiver, assets);
-        emit EventsLib.WithdrawalClaimed(requestId, receiver, assets);
-        return assets;
+            // Merge the queued fee snapshot into the claimable balance.
+            ClaimableWithdrawal storage claimable = _claimableWithdrawal[onBehalf];
+            uint256 oldClaim = claimable.assets;
+            uint64 oldFee = claimable.fee;
+            if (oldClaim == 0) {
+                claimable.fee = p.feeAtRequest;
+            } else if (oldFee != p.feeAtRequest) {
+                claimable.fee = uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
+            }
+            claimable.assets = uint128(oldClaim + amt);
+            delete pendingWithdrawal[onBehalf];
+            emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
+            unchecked {
+                ++i;
+            }
+        }
+
+        if (newReserved != reserved) reservedAssets = newReserved;
     }
 
-    /// @dev Returns shares withdrawn as penalty.
-    /// @dev When calling this function, a penalty is taken from onBehalf, in order to discourage allocation
-    /// manipulations.
-    /// @dev The penalty is taken as a withdrawal for which assets are returned to the vault. In consequence,
-    /// totalAssets is decreased normally along with totalSupply (the share price doesn't change except because of
-    /// rounding errors), but the amount of assets actually controlled by the vault is not decreased.
-    /// @dev If a user has A assets in the vault, and that the vault is already fully illiquid, the optimal amount to
-    /// force deallocate in order to exit the vault is min(liquidity_of_market, A / (1 + penalty)).
-    /// This ensures that either the market is empty or that it leaves no shares nor liquidity after exiting.
-    function forceDeallocate(address strategy, bytes memory data, uint256 assets, address onBehalf)
+    /// @notice Partially fulfills pending withdrawals.
+    /// @dev Any remaining balance stays queued with the original fee snapshot.
+    function fulfillWithdrawalPartial(address[] calldata onBehalfs, uint256[] calldata amounts)
+        external
+        onlyRole(ALLOCATOR_ROLE)
+    {
+        require(onBehalfs.length == amounts.length, ErrorsLib.InvalidRequest());
+
+        uint256 len = onBehalfs.length;
+        IERC20 assetToken = IERC20(asset);
+        uint256 balance = assetToken.balanceOf(address(this));
+        uint256 reserved = reservedAssets;
+        uint256 newReserved = reserved;
+
+        for (uint256 i; i < len;) {
+            address onBehalf = onBehalfs[i];
+            uint256 amt = amounts[i];
+
+            PendingWithdrawal memory p = pendingWithdrawal[onBehalf];
+            require(amt > 0 && amt <= p.assets, ErrorsLib.InvalidRequest());
+            require(balance - newReserved >= amt, ErrorsLib.InsufficientLiquidity());
+
+            newReserved += amt;
+
+            // Merge the fee snapshot into the claimable balance.
+            ClaimableWithdrawal storage claimable = _claimableWithdrawal[onBehalf];
+            uint256 oldClaim = claimable.assets;
+            uint64 oldFee = claimable.fee;
+            if (oldClaim == 0) {
+                claimable.fee = p.feeAtRequest;
+            } else if (oldFee != p.feeAtRequest) {
+                claimable.fee = uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
+            }
+            claimable.assets = uint128(oldClaim + amt);
+
+            // Reduce the remaining queued balance.
+            uint256 newAssets = uint256(p.assets) - amt;
+            if (newAssets == 0) {
+                delete pendingWithdrawal[onBehalf];
+            } else {
+                // Keep shares in proportion to the remaining assets.
+                uint256 newShares = (uint256(p.shares) * newAssets) / uint256(p.assets);
+                PendingWithdrawal storage ps = pendingWithdrawal[onBehalf];
+                ps.assets = newAssets.toUint128();
+                ps.shares = newShares.toUint128();
+            }
+
+            emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
+            unchecked {
+                ++i;
+            }
+        }
+
+        if (newReserved != reserved) reservedAssets = newReserved;
+    }
+
+    /// @notice Settles a fulfilled withdrawal for `onBehalf`.
+    /// @dev Uses the fee snapshot stored when the request was queued and fulfilled.
+    function claim(address onBehalf) external returns (uint256) {
+        ClaimableWithdrawal memory claimable = _claimableWithdrawal[onBehalf];
+        uint256 assetsOut = claimable.assets;
+        require(assetsOut > 0, ErrorsLib.RequestNotPending());
+        require(IERC20(asset).balanceOf(address(this)) >= assetsOut, ErrorsLib.InsufficientLiquidity());
+
+        // Use the stored fee snapshot rather than the current withdrawal fee.
+        uint256 lockedFee = claimable.fee;
+        delete _claimableWithdrawal[onBehalf];
+        reservedAssets -= assetsOut;
+        pendingClaimableAssets -= assetsOut;
+
+        uint256 fee = assetsOut.mulDivUp(lockedFee, WAD);
+        uint256 netAssets = assetsOut - fee;
+        if (fee > 0) {
+            require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
+            SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
+        }
+
+        SafeERC20Lib.safeTransfer(asset, onBehalf, netAssets);
+        emit EventsLib.WithdrawalClaimed(onBehalf, netAssets);
+        return netAssets;
+    }
+
+    /// @notice Returns whether `onBehalf` has claimable assets.
+    function isClaimable(address onBehalf) external view returns (bool) {
+        return _claimableWithdrawal[onBehalf].assets > 0;
+    }
+
+    /// @notice Returns aggregate liquidity available for withdrawals.
+    function availableLiquidity() external view returns (uint256) {
+        uint256 idle = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
+        if (strategyManager != address(0)) {
+            idle += IStrategyManager(strategyManager).availableStrategyLiquidity();
+        }
+        return idle;
+    }
+
+    /// @dev Burns shares as a force-deallocation penalty.
+    /// The penalty is settled immediately and never enters the withdrawal queue.
+    function forceDeallocate(address strategy, bytes calldata data, uint256 assets, address onBehalf)
         external
         returns (uint256)
     {
         bytes32[] memory ids = deallocateInternal(strategy, data, assets);
-        uint256 penaltyAssets = assets.mulDivUp(forceDeallocatePenalty[strategy], WAD);
-        uint256 penaltyShares = withdraw(penaltyAssets, address(this), onBehalf);
+
+        uint256 penaltyAssets = assets.mulDivUp(IStrategyManager(strategyManager).forceDeallocatePenalty(strategy), WAD);
+        accrueInterest();
+        uint256 penaltyShares = previewWithdraw(penaltyAssets);
+
+        require(canSendShares(onBehalf), ErrorsLib.CannotSendShares());
+
+        if (msg.sender != onBehalf) {
+            uint256 _allowance = allowance[onBehalf][msg.sender];
+            if (_allowance != type(uint256).max) allowance[onBehalf][msg.sender] = _allowance - penaltyShares;
+        }
+
+        deleteShares(onBehalf, penaltyShares);
+        _totalAssets -= penaltyAssets.toUint128();
+
         emit EventsLib.ForceDeallocate(msg.sender, strategy, assets, onBehalf, ids, penaltyAssets);
         return penaltyShares;
     }
 
     /* ERC20 FUNCTIONS */
 
-    /// @dev Returns success (always true because reverts on failure).
+    /// @dev Always returns true on success.
     function transfer(address to, uint256 shares) external returns (bool) {
         require(to != address(0), ErrorsLib.ZeroAddress());
 
@@ -708,7 +782,7 @@ contract Vault is IVault {
         return true;
     }
 
-    /// @dev Returns success (always true because reverts on failure).
+    /// @dev Always returns true on success.
     function transferFrom(address from, address to, uint256 shares) external returns (bool) {
         require(from != address(0), ErrorsLib.ZeroAddress());
         require(to != address(0), ErrorsLib.ZeroAddress());
@@ -730,14 +804,14 @@ contract Vault is IVault {
         return true;
     }
 
-    /// @dev Returns success (always true because reverts on failure).
+    /// @dev Always returns true on success.
     function approve(address spender, uint256 shares) external returns (bool) {
         allowance[msg.sender][spender] = shares;
         emit EventsLib.Approval(msg.sender, spender, shares);
         return true;
     }
 
-    /// @dev Signature malleability is not explicitly prevented but it is not a problem thanks to the nonce.
+    /// @dev Nonces prevent replay even if a signature is malleable.
     function permit(address _owner, address spender, uint256 shares, uint256 deadline, uint8 v, bytes32 r, bytes32 s)
         external
     {
