@@ -11,6 +11,7 @@ import {WAD} from "../../src/libraries/ConstantsLib.sol";
 import {MarketParams, Id} from "../../src/strategies/morpho/interfaces/IMorpho.sol";
 import {MarketParamsLib} from "../../src/strategies/morpho/libraries/MarketParamsLib.sol";
 import {EnvSigner} from "../EnvSigner.sol";
+import {DeployConfig} from "../DeployConfig.sol";
 import {MorphoMock} from "../../test/mocks/MorphoMock.sol";
 import {IrmMock} from "../../test/mocks/IrmMock.sol";
 import {ERC20Mock} from "../../test/mocks/ERC20Mock.sol";
@@ -37,34 +38,42 @@ import {ERC20Mock} from "../../test/mocks/ERC20Mock.sol";
 ///   vault           Vault contract (its `asset()` is read to wire the strategy)
 ///   strategyManager Vault's StrategyManager (per-vault instance)
 ///   roleManager     Shared RoleManager
+///   morpho          Morpho Blue protocol (0 -> config.external.morpho; still 0 -> deploy a MOCK +
+///                   mock IRM/collateral + a demo market, for testnet only)
 ///
 /// Required env: PRIVATE_KEY or MNEMONIC (signer must hold DEFAULT_ADMIN_ROLE on RoleManager).
 ///
-/// Usage (USDT vault):
+/// Usage (mock, testnet):
 ///   forge script script/deploy/13_DeployMorphoStrategy.s.sol \
-///     --sig "run(address,address,address)" \
-///     0x55bf9D9276FfD80523b2417fA9a6A3242d1C9702 \
-///     0x535D25d2691B0933a5e1E2eE48feFacAD3b317eD \
-///     0xC395D30856E152A372aa2BD367A0e74fdA702bC0 \
+///     --sig "run(address,address,address,address)" \
+///     0xVault 0xStrategyManager 0xRoleManager 0x0 \
 ///     --rpc-url arbitrum_sepolia --broadcast
-contract DeployMorphoStrategy is EnvSigner {
+contract DeployMorphoStrategy is EnvSigner, DeployConfig {
     using MarketParamsLib for MarketParams;
 
-    function run(address vaultAddr, address smAddr, address rmAddr) external {
+    function run(address vaultAddr, address smAddr, address rmAddr, address morpho) external {
         Vault vault = Vault(vaultAddr);
         address asset = vault.asset();
         RoleManager rm = RoleManager(rmAddr);
         StrategyManager sm = StrategyManager(smAddr);
 
+        // Resolve Morpho: arg -> config.external.morpho -> (still 0) deploy a mock demo below.
+        if (morpho == address(0) && _configAvailable()) morpho = _loadConfig().morpho;
+        bool useMock = morpho == address(0);
+
         address signer = _startBroadcastFromEnv();
 
-        // 1. Deploy the mock Morpho Blue protocol, a zero-rate IRM, and a mock collateral token.
-        MorphoMock morpho = new MorphoMock();
-        IrmMock irm = new IrmMock();
-        ERC20Mock collateral = new ERC20Mock(8); // WBTC-like; collateral is not validated by the mock.
+        // 1. When no real Morpho is given, deploy the mock protocol + a zero-rate IRM + mock collateral.
+        IrmMock irm;
+        ERC20Mock collateral;
+        if (useMock) {
+            morpho = address(new MorphoMock());
+            irm = new IrmMock();
+            collateral = new ERC20Mock(8); // WBTC-like; collateral is not validated by the mock.
+        }
 
         // 2. Deploy the strategy bound to (vault, asset, morpho).
-        MorphoStrategy strategy = new MorphoStrategy(vaultAddr, asset, address(morpho), rmAddr);
+        MorphoStrategy strategy = new MorphoStrategy(vaultAddr, asset, morpho, rmAddr);
 
         // 3. Self-grant vault-scoped GOVERNANCE. Signer must hold DEFAULT_ADMIN_ROLE (global admin
         //    of every scoped GOVERNANCE_ROLE). Leave in place; revoke separately to restore
@@ -72,52 +81,52 @@ contract DeployMorphoStrategy is EnvSigner {
         bytes32 govRole = rm.getScopedRole(vaultAddr, "GOVERNANCE_ROLE");
         rm.grantRole(govRole, signer);
 
-        // 4. Whitelist the mock IRM (allocate reverts on an unapproved IRM).
-        strategy.setIrmApproved(address(irm), true);
-
-        // 5. Register the strategy (kind=1: ONCHAIN -> "DeFi" bucket).
+        // 4. Register the strategy (kind=1: ONCHAIN -> "DeFi" bucket) and lift its strategy-level cap.
         sm.addStrategy(address(strategy), 1, 0);
-
-        // 6. Lift caps for the three ids emitted by `MorphoStrategy._ids` for the canonical market.
-        //    All three must permit flow or `allocate()` reverts on the smallest.
-        MarketParams memory mp = MarketParams({
-            loanToken: asset,
-            collateralToken: address(collateral),
-            oracle: address(0),
-            irm: address(irm),
-            lltv: 0.86e18
-        });
-
         bytes memory strategyIdData = abi.encode("MorphoStrategy", address(strategy));
-        bytes memory collateralIdData = abi.encode("collateralToken", address(collateral));
-        bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
-
         sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
         sm.increaseRelativeCap(strategyIdData, WAD);
-        sm.increaseAbsoluteCap(collateralIdData, type(uint128).max);
-        sm.increaseRelativeCap(collateralIdData, WAD);
-        sm.increaseAbsoluteCap(marketIdData, type(uint128).max);
-        sm.increaseRelativeCap(marketIdData, WAD);
+
+        // 5. Mock path only: whitelist the mock IRM and lift the demo market's collateral/market caps.
+        //    For a real Morpho, an operator approves the real IRM and sets real market caps separately.
+        MarketParams memory mp;
+        if (useMock) {
+            strategy.setIrmApproved(address(irm), true);
+            mp = MarketParams({
+                loanToken: asset,
+                collateralToken: address(collateral),
+                oracle: address(0),
+                irm: address(irm),
+                lltv: 0.86e18
+            });
+            bytes memory collateralIdData = abi.encode("collateralToken", address(collateral));
+            bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
+            sm.increaseAbsoluteCap(collateralIdData, type(uint128).max);
+            sm.increaseRelativeCap(collateralIdData, WAD);
+            sm.increaseAbsoluteCap(marketIdData, type(uint128).max);
+            sm.increaseRelativeCap(marketIdData, WAD);
+        }
 
         vm.stopBroadcast();
-
-        bytes memory encodedMarketParams = abi.encode(mp);
 
         console.log("=== MorphoStrategy deployed + wired ===");
         console.log("strategy        :", address(strategy));
         console.log("vault           :", vaultAddr);
         console.log("asset           :", asset);
         console.log("strategyManager :", smAddr);
-        console.log("mockMorpho      :", address(morpho));
-        console.log("mockIrm         :", address(irm));
-        console.log("mockCollateral  :", address(collateral));
-        console.log("marketId        :");
-        console.logBytes32(Id.unwrap(mp.id()));
-        console.log("");
-        console.log("To allocate idle funds into this market, an ALLOCATOR runs:");
-        console.log("  vault.allocate(strategy, <encodedMarketParams>, assets)");
-        console.log("encodedMarketParams:");
-        console.logBytes(encodedMarketParams);
+        console.log("morpho          :", morpho, useMock ? "(MOCK)" : "(real, from arg/config)");
+        if (useMock) {
+            console.log("mockIrm         :", address(irm));
+            console.log("mockCollateral  :", address(collateral));
+            console.log("marketId        :");
+            console.logBytes32(Id.unwrap(mp.id()));
+            console.log("To allocate idle funds into this demo market, an ALLOCATOR runs:");
+            console.log("  vault.allocate(strategy, <encodedMarketParams>, assets)");
+            console.log("encodedMarketParams:");
+            console.logBytes(abi.encode(mp));
+        } else {
+            console.log("Real Morpho: approve the IRM and set market caps before allocating.");
+        }
         console.log("");
         console.log("Restore Timelock-only governance later via:");
         console.log("  rm.revokeRole(rm.getScopedRole(vault, 'GOVERNANCE_ROLE'), signer)");

@@ -9,17 +9,19 @@ import {StrategyManager} from "../../src/StrategyManager.sol";
 import {Vault} from "../../src/Vault.sol";
 import {WAD} from "../../src/libraries/ConstantsLib.sol";
 import {EnvSigner} from "../EnvSigner.sol";
+import {DeployConfig} from "../DeployConfig.sol";
 
 /// @notice Step 12 — deploy an OffchainNAVStrategy for the given vault and wire it into the vault's
 /// StrategyManager. Signer self-grants vault-scoped GOVERNANCE (admined by DEFAULT_ADMIN_ROLE),
 /// registers the strategy as kind=2 (OFFCHAIN_NAV), and lifts its cap to max.
 ///
-/// In production the strategy is then used by the offchain manager (sends idle to custodian) and
-/// the reporter (posts NAV updates). Both roles are scoped to the strategy address:
+/// In production the strategy is used by the offchain manager (sends idle to custodian) and the
+/// reporter (posts NAV updates). Both roles are scoped to the strategy address:
 ///   - scoped(strategy, OFFCHAIN_MANAGER)
 ///   - scoped(strategy, OFFCHAIN_REPORTER)
-/// They are NOT granted by this script — assign them via the RoleManager once you know the operator
-/// addresses.
+/// This script grants them to config.roles.offchainManager / offchainReporter (per-network config,
+/// selected by chainid). Non-zero entries only; leave a config field at 0 to grant it manually later.
+/// custodian likewise comes from CUSTODIAN env > config.external.custodian > signer (testnet).
 ///
 /// Repeat once per vault: each vault needs its OWN strategy instance (vault + asset are immutable).
 ///
@@ -40,15 +42,20 @@ import {EnvSigner} from "../EnvSigner.sol";
 ///     --sig "run(address,address,address)" \
 ///     0xUSDTVault 0xUSDTStrategyManager 0xRoleManager \
 ///     --rpc-url arbitrum_sepolia --broadcast --verify
-contract DeployOffchainStrategy is EnvSigner {
+contract DeployOffchainStrategy is EnvSigner, DeployConfig {
     function run(address vaultAddr, address smAddr, address rmAddr) external {
         Vault vault = Vault(vaultAddr);
         address asset = vault.asset();
         RoleManager rm = RoleManager(rmAddr);
         StrategyManager sm = StrategyManager(smAddr);
 
-        // Knobs (with sensible testnet defaults).
+        // Per-network config: custodian + the offchain operator role holders (manager / reporter).
+        Config memory c;
+        if (_configAvailable()) c = _loadConfig();
+
+        // Knobs (with sensible testnet defaults). custodian: CUSTODIAN env > config.custodian > signer.
         address custodian = vm.envOr("CUSTODIAN", address(0));
+        if (custodian == address(0)) custodian = c.custodian;
         uint256 stalePeriod = vm.envOr("STALE_PERIOD", uint256(7 days));
         uint256 minReportInterval = vm.envOr("MIN_REPORT_INTERVAL", uint256(1 hours));
         uint256 maxChangeBps = vm.envOr("MAX_CHANGE_BPS", uint256(1000)); // 10%
@@ -76,6 +83,15 @@ contract DeployOffchainStrategy is EnvSigner {
         sm.increaseAbsoluteCap(idData, type(uint128).max);
         sm.increaseRelativeCap(idData, WAD);
 
+        // 5. Grant the offchain operator roles to the config holders (scoped to the strategy address).
+        //    Admin of these roles is DEFAULT_ADMIN_ROLE, which the signer holds. Skipped if config is empty.
+        if (c.offchainManager != address(0)) {
+            rm.grantRole(rm.getScopedRole(address(strategy), "OFFCHAIN_MANAGER"), c.offchainManager);
+        }
+        if (c.offchainReporter != address(0)) {
+            rm.grantRole(rm.getScopedRole(address(strategy), "OFFCHAIN_REPORTER"), c.offchainReporter);
+        }
+
         vm.stopBroadcast();
 
         console.log("=== OffchainNAVStrategy deployed + wired ===");
@@ -87,9 +103,7 @@ contract DeployOffchainStrategy is EnvSigner {
         console.log("stalePeriod (sec)    :", stalePeriod);
         console.log("minReportInterval(s) :", minReportInterval);
         console.log("maxChangeBps         :", maxChangeBps);
-        console.log("");
-        console.log("Operator roles NOT granted; do so via RoleManager once you have addresses:");
-        console.log("  rm.grantRole(scoped(strategy, 'OFFCHAIN_MANAGER'), <manager>)");
-        console.log("  rm.grantRole(scoped(strategy, 'OFFCHAIN_REPORTER'), <reporter>)");
+        console.log("offchainManager      :", c.offchainManager, c.offchainManager == address(0) ? "(not granted)" : "(granted)");
+        console.log("offchainReporter     :", c.offchainReporter, c.offchainReporter == address(0) ? "(not granted)" : "(granted)");
     }
 }

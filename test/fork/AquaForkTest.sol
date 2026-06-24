@@ -24,11 +24,11 @@ import "../../src/libraries/ConstantsLib.sol";
 ///   forge test --match-path test/fork/AquaForkTest.sol -vv
 contract AquaForkTest is Test {
     /* LIVE DEPLOYMENT (Arbitrum Sepolia) */
-    address constant ROLE_MANAGER = 0x52815561C58731761DBfa302d0aE160712F7b331;
-    address constant TIMELOCK = 0x00Ba9Bd0E7aE1c0D726901786A3638A64aa1027b;
+    address constant ROLE_MANAGER = 0xD122D6d5A7853993E17D396Ba9f87FA7A5add0f8;
+    address constant TIMELOCK = 0xdd116B360A03339953669980B2146537C6a97521;
     address constant ADMIN = 0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11; // holds DEFAULT_ADMIN_ROLE
-    address constant STRATEGY_MANAGER = 0xe366037A8092A5159c19FfA9B30e6344dd412386;
-    address constant VAULT = 0xD408A6B5425e9866dc05F68F2c75e8F2F7495d95;
+    address constant STRATEGY_MANAGER = 0x38F1A92F3903a48aaffAad66993692a9D6127bC9; // USDT vault SM
+    address constant VAULT = 0xb9c6dd9ef6E4D1f372e91dDD271e3865Dc228a10; // USDT vault
     address constant ASSET = 0x6777ab1c1EBFC40d3442202158bEA959E04AC744; // USDT (6 decimals)
     address constant AQUA_POOL = 0xd7105C76a995b8566e2DcC991FB4D8A13Ca6f816; // Aave-V2-style lending pool
     address constant ATOKEN = 0x6E6d0013a5c76131652bc7282eeac5536D8c2ae3; // acUSDT

@@ -9,6 +9,7 @@ import {StrategyManager} from "../../src/StrategyManager.sol";
 import {Vault} from "../../src/Vault.sol";
 import {WAD} from "../../src/libraries/ConstantsLib.sol";
 import {EnvSigner} from "../EnvSigner.sol";
+import {DeployConfig} from "../DeployConfig.sol";
 
 /// @notice Step 9 — deploy an AquaStrategy for an existing vault and wire it into the vault's
 /// StrategyManager. The signer self-grants the vault-scoped GOVERNANCE_ROLE (admined by
@@ -20,8 +21,8 @@ import {EnvSigner} from "../EnvSigner.sol";
 ///
 /// Args:
 ///   vault           Vault contract (its `asset()` is read to wire the strategy)
-///   lendingPool     Aqua / Aave-V2 lending pool
-///   aToken          receipt aToken for `vault.asset()` on `lendingPool`
+///   lendingPool     Aqua / Aave-V2 lending pool (0 -> config.external.aavePool)
+///   aToken          receipt aToken for `vault.asset()` on `lendingPool` (0 -> config.external.aToken)
 ///   strategyManager Vault's StrategyManager (per-vault instance)
 ///   roleManager     Shared RoleManager
 ///
@@ -32,7 +33,7 @@ import {EnvSigner} from "../EnvSigner.sol";
 ///     --sig "run(address,address,address,address,address)" \
 ///     0xUSDTVault 0xAquaPool 0xAUSDT 0xUSDTStrategyManager 0xRoleManager \
 ///     --rpc-url arbitrum_sepolia --broadcast
-contract DeployAquaStrategy is EnvSigner {
+contract DeployAquaStrategy is EnvSigner, DeployConfig {
     function run(
         address vaultAddr,
         address lendingPool,
@@ -44,6 +45,15 @@ contract DeployAquaStrategy is EnvSigner {
         address asset = vault.asset();
         RoleManager rm = RoleManager(rmAddr);
         StrategyManager sm = StrategyManager(smAddr);
+
+        // Fall back to the per-network config for any address left as 0 (only reads config when needed,
+        // so a fully-specified arg invocation works on chains without a config file).
+        if (lendingPool == address(0) || aToken == address(0)) {
+            require(_configAvailable(), "Aqua: pass lendingPool+aToken, or deploy on a configured chain");
+            Config memory c = _loadConfig();
+            if (lendingPool == address(0)) lendingPool = c.aavePool;
+            if (aToken == address(0)) aToken = c.aToken;
+        }
 
         address signer = _startBroadcastFromEnv();
 
