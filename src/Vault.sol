@@ -430,6 +430,20 @@ contract Vault is IVault, AccessManaged {
         if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
     }
 
+    function _requireFreshOffchainStrategiesForEntry() internal view {
+        address _strategyManager = strategyManager;
+        if (_strategyManager == address(0)) return;
+        if (IStrategyManager(_strategyManager).hasBlockingStaleOffchainExposure()) {
+            revert ErrorsLib.StaleOffchainStrategy();
+        }
+    }
+
+    function _blendFee(uint256 oldAmt, uint64 oldFee, uint256 newAmt, uint64 newFee) internal pure returns (uint64) {
+        if (oldAmt == 0) return newFee;
+        if (oldFee == newFee) return oldFee;
+        return uint64((oldAmt * uint256(oldFee) + newAmt * uint256(newFee)) / (oldAmt + newAmt));
+    }
+
     /// @dev Returns the shares minted for `assets`, net of deposit fees.
     function previewDeposit(uint256 assets) public view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
@@ -502,6 +516,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Charges `depositFee` and mints shares against the net assets.
     function deposit(uint256 assets, address onBehalf) external whenNotPaused returns (uint256) {
+        _requireFreshOffchainStrategiesForEntry();
         accrueInterest();
         uint256 shares = previewDeposit(assets);
         uint256 fee = assets.mulDivUp(depositFee, WAD);
@@ -512,6 +527,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Mints `shares` to `onBehalf` for the required gross assets.
     function mint(uint256 shares, address onBehalf) external whenNotPaused returns (uint256) {
+        _requireFreshOffchainStrategiesForEntry();
         accrueInterest();
         uint256 grossAssets = previewMint(shares);
         uint256 fee = grossAssets.mulDivUp(depositFee, WAD);
@@ -592,14 +608,7 @@ contract Vault is IVault, AccessManaged {
             PendingWithdrawal storage p = pendingWithdrawal[onBehalf];
             uint256 oldAssets = p.assets;
             uint64 newFee = uint64(withdrawalFee);
-            if (oldAssets == 0) {
-                p.feeAtRequest = newFee;
-            } else if (newFee != p.feeAtRequest) {
-                // Weighted by assets.
-                p.feeAtRequest = uint64(
-                    (oldAssets * uint256(p.feeAtRequest) + assetsOut * uint256(newFee)) / (oldAssets + assetsOut)
-                );
-            }
+            p.feeAtRequest = _blendFee(oldAssets, p.feeAtRequest, assetsOut, newFee);
             p.assets = (oldAssets + assetsOut).toUint128();
             p.shares = (uint256(p.shares) + shares).toUint128();
             pendingClaimableAssets += assetsOut;
@@ -628,12 +637,7 @@ contract Vault is IVault, AccessManaged {
             // Merge the queued fee snapshot into the claimable balance.
             ClaimableWithdrawal storage claimable = _claimableWithdrawal[onBehalf];
             uint256 oldClaim = claimable.assets;
-            uint64 oldFee = claimable.fee;
-            if (oldClaim == 0) {
-                claimable.fee = p.feeAtRequest;
-            } else if (oldFee != p.feeAtRequest) {
-                claimable.fee = uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
-            }
+            claimable.fee = _blendFee(oldClaim, claimable.fee, amt, p.feeAtRequest);
             claimable.assets = uint128(oldClaim + amt);
             delete pendingWithdrawal[onBehalf];
             emit EventsLib.WithdrawalFulfilled(onBehalf, amt);
@@ -672,12 +676,7 @@ contract Vault is IVault, AccessManaged {
             // Merge the fee snapshot into the claimable balance.
             ClaimableWithdrawal storage claimable = _claimableWithdrawal[onBehalf];
             uint256 oldClaim = claimable.assets;
-            uint64 oldFee = claimable.fee;
-            if (oldClaim == 0) {
-                claimable.fee = p.feeAtRequest;
-            } else if (oldFee != p.feeAtRequest) {
-                claimable.fee = uint64((oldClaim * uint256(oldFee) + amt * uint256(p.feeAtRequest)) / (oldClaim + amt));
-            }
+            claimable.fee = _blendFee(oldClaim, claimable.fee, amt, p.feeAtRequest);
             claimable.assets = uint128(oldClaim + amt);
 
             // Reduce the remaining queued balance.

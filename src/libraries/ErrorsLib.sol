@@ -48,6 +48,7 @@ library ErrorsLib {
     error RequestNotPending();
     error ReportTooSoon();
     error ReturnNotReceived();
+    error StaleOffchainStrategy();
     error TimelockNotDecreasing();
     error TimelockNotExpired();
     error TimelockNotIncreasing();

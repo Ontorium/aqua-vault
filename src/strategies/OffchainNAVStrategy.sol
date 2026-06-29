@@ -122,10 +122,12 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     /* VAULT STRATEGY INTERFACE */
 
     /// @notice Returns the assets counted by the vault.
-    /// @dev Falls back to onchain idle assets while reports are stale.
+    /// @dev Before the first report only onchain idle counts. Once at least one report exists, the last
+    /// reported NAV remains in `totalAssets()` even when it becomes stale; deposits/mints are blocked at
+    /// the vault level while stale so an expired mark cannot be used for new entry pricing.
     function totalAssets() external view override returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this));
-        if (isStale()) return idle;
+        if (_position.lastReportTime == 0) return idle;
 
         return idle + uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
     }
@@ -133,7 +135,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     /// @notice Returns available liquidity for withdrawals.
     function availableLiquidity() external view override returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this));
-        if (isStale()) return idle;
+        if (_position.lastReportTime == 0 || isStale()) return idle;
 
         return idle + uint256(_position.reportedAvailableLiquidity);
     }
@@ -221,7 +223,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         uint256 newPendingReceivable,
         bytes32 newReportHash,
         string calldata newReportURI
-    ) external onlyReporter {
+    ) external override onlyReporter {
         _recordNAVReport(
             newReportedAssets,
             newReportedAvailableLiquidity,
@@ -230,24 +232,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
             newReportURI,
             maxChangeBps
         );
-    }
-
-    /// @notice Backward-compatible report function.
-    function report(uint256 newReportedAssets, bytes32 newReportHash, string calldata newReportURI)
-        external
-        onlyReporter
-    {
-        _recordNAVReport(newReportedAssets, 0, 0, newReportHash, newReportURI, maxChangeBps);
-    }
-
-    /// @notice Backward-compatible report function with liquidity.
-    function report(
-        uint256 newReportedAssets,
-        uint256 newReportedAvailableLiquidity,
-        bytes32 newReportHash,
-        string calldata newReportURI
-    ) external override onlyReporter {
-        _recordNAVReport(newReportedAssets, newReportedAvailableLiquidity, 0, newReportHash, newReportURI, maxChangeBps);
     }
 
     function _approveVault(uint256 assets) internal {
