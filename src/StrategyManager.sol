@@ -6,6 +6,8 @@
 pragma solidity ^0.8.24;
 
 import {Caps} from "./interfaces/IVault.sol";
+import {IOffchainNAVStrategy} from "./interfaces/IOffchainNAVStrategy.sol";
+import {IOffchainStrategyStatus} from "./interfaces/IOffchainStrategyStatus.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
 import {IStrategyRegistry} from "./interfaces/IStrategyRegistry.sol";
@@ -63,6 +65,22 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
     function isStrategyActive(address strategy) external view returns (bool) {
         return strategyConfig[strategy].active;
+    }
+
+    /// @notice Returns whether any offchain NAV strategy is stale while still carrying offchain
+    /// exposure. Vault entry is blocked in this state so stale marks cannot price new shares.
+    function hasBlockingStaleOffchainExposure() external view returns (bool) {
+        uint256 len = strategies.length;
+        for (uint256 i; i < len;) {
+            address strategy = strategies[i];
+            if (strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV && _staleOffchainExposure(strategy)) {
+                return true;
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
     }
 
     function absoluteCap(bytes32 id) external view returns (uint256) {
@@ -276,8 +294,8 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         uint256 len = ids.length;
         for (uint256 i; i < len;) {
             Caps storage _caps = caps[ids[i]];
-            require(_caps.allocation > 0, ErrorsLib.ZeroAllocation());
-            _caps.allocation = (int256(_caps.allocation) + change).toUint256();
+            int256 newAllocation = int256(_caps.allocation) + change;
+            _caps.allocation = newAllocation <= 0 ? 0 : uint256(newAllocation);
             unchecked {
                 ++i;
             }
@@ -341,6 +359,15 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         if (success && data.length >= 32) {
             liquidity = abi.decode(data, (uint256));
         }
+    }
+
+    function _staleOffchainExposure(address strategy) internal view returns (bool) {
+        IOffchainStrategyStatus offchain = IOffchainStrategyStatus(strategy);
+        if (!offchain.isStale()) return false;
+
+        return offchain.deployedPrincipal() != 0
+            || offchain.reportedAssets() != 0
+            || offchain.pendingReceivable() != 0;
     }
 
 }

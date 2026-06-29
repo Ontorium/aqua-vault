@@ -39,6 +39,7 @@ interface IStrategyManager {
     /// @notice Vault-only cap accounting hooks invoked after each allocate/deallocate.
     function onAllocate(address strategy, bytes32[] calldata ids, int256 change, uint256 totalAssetsForCaps) external;
     function onDeallocate(address strategy, bytes32[] calldata ids, int256 change) external;
+    function hasBlockingStaleOffchainExposure() external view returns (bool);
 
     function strategiesLength() external view returns (uint256);
     function strategies(uint256 index) external view returns (address);

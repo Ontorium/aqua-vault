@@ -275,6 +275,42 @@ contract AquaStrategyTest is BaseTest {
         assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault totalAssets grew by interest");
     }
 
+    /// @notice End-to-end: once yield accrues, the allocator can pull principal + interest in one exit
+    /// and the cap accounting zero-floors instead of underflowing.
+    /// forge-config: default.isolate = true
+    function testFullDeallocateAfterInterestReturnsPrincipalAndYield() public {
+        bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
+        bytes memory aTokenIdData = abi.encode("aToken", address(aToken));
+        vm.startPrank(governance);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        strategyManager.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(strategyIdData, WAD);
+        strategyManager.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(aTokenIdData, WAD);
+        vm.stopPrank();
+
+        uint256 principal = 1_000e18;
+        uint256 interest = 100e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, principal);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), principal);
+        vault.deposit(principal, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", principal);
+        aToken.accrue(address(strategy), interest);
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", principal + interest);
+
+        assertEq(strategy.totalAssets(), 0, "strategy fully unwound");
+        assertEq(underlyingToken.balanceOf(address(vault)), principal + interest, "vault received principal+yield");
+        assertEq(strategyManager.allocation(_expectedStrategyId()), 0, "strategy cap zeroed");
+        assertEq(strategyManager.allocation(_expectedATokenId()), 0, "aToken cap zeroed");
+    }
+
     /* ── writeOff (phantom asset NAV reduction) ───────────────────────────────── */
 
     /// @notice writeOff(amount) subtracts from totalAssets() and is monotonic — multiple calls

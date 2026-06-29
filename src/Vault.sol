@@ -430,6 +430,14 @@ contract Vault is IVault, AccessManaged {
         if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
     }
 
+    function _requireFreshOffchainStrategiesForEntry() internal view {
+        address _strategyManager = strategyManager;
+        if (_strategyManager == address(0)) return;
+        if (IStrategyManager(_strategyManager).hasBlockingStaleOffchainExposure()) {
+            revert ErrorsLib.StaleOffchainStrategy();
+        }
+    }
+
     /// @dev Returns the shares minted for `assets`, net of deposit fees.
     function previewDeposit(uint256 assets) public view returns (uint256) {
         (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
@@ -502,6 +510,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Charges `depositFee` and mints shares against the net assets.
     function deposit(uint256 assets, address onBehalf) external whenNotPaused returns (uint256) {
+        _requireFreshOffchainStrategiesForEntry();
         accrueInterest();
         uint256 shares = previewDeposit(assets);
         uint256 fee = assets.mulDivUp(depositFee, WAD);
@@ -512,6 +521,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Mints `shares` to `onBehalf` for the required gross assets.
     function mint(uint256 shares, address onBehalf) external whenNotPaused returns (uint256) {
+        _requireFreshOffchainStrategiesForEntry();
         accrueInterest();
         uint256 grossAssets = previewMint(shares);
         uint256 fee = grossAssets.mulDivUp(depositFee, WAD);

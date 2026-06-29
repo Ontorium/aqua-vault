@@ -169,6 +169,61 @@ contract MorphoStrategyTest is BaseTest {
         assertApproxEqAbs(strategy.totalAssets(), before + 100e18, 1, "interest surfaced in NAV");
     }
 
+    /// @notice End-to-end: after principal is withdrawn and cap allocations reach zero, the residual
+    /// profit can still be unwound instead of getting stranded behind ZeroAllocation.
+    /// forge-config: default.isolate = true
+    function testResidualYieldCanBeDeallocatedAfterPrincipalUnwind() public {
+        MarketParams memory mp = _params(collateralA, address(irm));
+        bytes memory strategyIdData = abi.encode("MorphoStrategy", address(strategy));
+        bytes memory collateralIdData = abi.encode("collateralToken", collateralA);
+        bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
+
+        vm.startPrank(governance);
+        strategyManager.addStrategy(address(strategy), 1 /* ONCHAIN */, 0);
+        strategyManager.increaseAbsoluteCap(strategyIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(strategyIdData, WAD);
+        strategyManager.increaseAbsoluteCap(collateralIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(collateralIdData, WAD);
+        strategyManager.increaseAbsoluteCap(marketIdData, type(uint128).max);
+        strategyManager.increaseRelativeCap(marketIdData, WAD);
+        vm.stopPrank();
+
+        uint256 principal = 1_000e18;
+        uint256 interest = 100e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, principal);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), principal);
+        vault.deposit(principal, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), abi.encode(mp), principal);
+
+        morpho.simulateInterest(mp.id(), interest);
+        underlyingToken.mint(address(morpho), interest);
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), abi.encode(mp), principal);
+
+        assertApproxEqAbs(strategy.totalAssets(), interest, 1, "profit remains in strategy");
+        assertEq(strategyManager.allocation(_expectedStrategyId()), 0, "strategy cap zero after principal");
+        assertEq(strategyManager.allocation(_expectedCollateralId(collateralA)), 0, "collateral cap zero after principal");
+        assertEq(strategyManager.allocation(_expectedMarketId(mp)), 0, "market cap zero after principal");
+
+        uint256 residual = strategy.totalAssets();
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), abi.encode(mp), residual);
+
+        assertEq(strategy.totalAssets(), 0, "strategy fully unwound");
+        assertApproxEqAbs(
+            underlyingToken.balanceOf(address(vault)), principal + interest, 1, "vault received principal+yield"
+        );
+        assertEq(strategyManager.allocation(_expectedStrategyId()), 0, "strategy cap zeroed");
+        assertEq(strategyManager.allocation(_expectedCollateralId(collateralA)), 0, "collateral cap zeroed");
+        assertEq(strategyManager.allocation(_expectedMarketId(mp)), 0, "market cap zeroed");
+    }
+
     function testAvailableLiquidityCapsAtMarketLiquidity() public {
         MarketParams memory mp = _params(collateralA, address(irm));
         _fundAndAllocate(mp, 1000e18);

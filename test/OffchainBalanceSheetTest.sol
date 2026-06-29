@@ -329,20 +329,61 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.deployToCustodian(0);
     }
 
-    function testStaleAssetsExcludeOffchain(uint256 amount, uint256 nav) public {
+    function testStaleAssetsRetainLastReportedNAV(uint256 amount, uint256 nav, uint256 liquidity) public {
         amount = bound(amount, 1, type(uint96).max);
         nav = bound(nav, 1, type(uint96).max);
+        liquidity = bound(liquidity, 0, nav);
 
         underlyingToken.mint(address(strategy), amount);
 
         vm.prank(reporter);
-        strategy.report(nav, 0, keccak256("r"), "");
-        // Fresh: nav is included.
+        strategy.report(nav, liquidity, keccak256("r"), "");
         assertEq(strategy.totalAssets(), amount + nav);
+        assertEq(strategy.availableLiquidity(), amount + liquidity);
 
         skip(1 days + 1);
-        // Stale: only onchain idle counts.
-        assertEq(strategy.totalAssets(), amount);
+        assertEq(strategy.totalAssets(), amount + nav, "stale keeps last reported NAV");
+        assertEq(strategy.availableLiquidity(), amount, "stale liquidity falls back to idle");
+    }
+
+    /// @notice Stale offchain marks no longer crash totalAssets, but new entry is blocked until a fresh
+    /// report arrives.
+    /// forge-config: default.isolate = true
+    function testStaleOffchainExposureBlocksDepositAndMint() public {
+        vm.prank(governance);
+        vault.setMaxRate(MAX_MAX_RATE);
+
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        address attacker = makeAddr("attacker");
+
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(deposit);
+        vm.prank(reporter);
+        strategy.report(deposit, deposit, keccak256("confirm"), "ipfs://confirm");
+
+        skip(1 days + 1);
+        assertTrue(strategy.isStale(), "strategy stale");
+        assertEq(strategy.totalAssets(), deposit, "last reported NAV retained");
+        assertEq(vault.totalAssets(), deposit, "vault NAV does not crash");
+
+        underlyingToken.mint(attacker, deposit);
+        vm.startPrank(attacker);
+        underlyingToken.approve(address(vault), deposit);
+        vm.expectRevert(ErrorsLib.StaleOffchainStrategy.selector);
+        vault.deposit(deposit, attacker);
+
+        vm.expectRevert(ErrorsLib.StaleOffchainStrategy.selector);
+        vault.mint(100e18, attacker);
+        vm.stopPrank();
     }
 
     /* ── skim (defensive token recovery) ──────────────────────────────────────── */
