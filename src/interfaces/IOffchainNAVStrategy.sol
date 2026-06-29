@@ -16,6 +16,7 @@ interface IOffchainNAVStrategy is IStrategy {
     function report(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,
+        uint256 newPendingReceivable,
         bytes32 newReportHash,
         string calldata newReportURI
     ) external;

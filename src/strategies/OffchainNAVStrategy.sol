@@ -223,7 +223,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         uint256 newPendingReceivable,
         bytes32 newReportHash,
         string calldata newReportURI
-    ) external onlyReporter {
+    ) external override onlyReporter {
         _recordNAVReport(
             newReportedAssets,
             newReportedAvailableLiquidity,
@@ -232,24 +232,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
             newReportURI,
             maxChangeBps
         );
-    }
-
-    /// @notice Backward-compatible report function.
-    function report(uint256 newReportedAssets, bytes32 newReportHash, string calldata newReportURI)
-        external
-        onlyReporter
-    {
-        _recordNAVReport(newReportedAssets, 0, 0, newReportHash, newReportURI, maxChangeBps);
-    }
-
-    /// @notice Backward-compatible report function with liquidity.
-    function report(
-        uint256 newReportedAssets,
-        uint256 newReportedAvailableLiquidity,
-        bytes32 newReportHash,
-        string calldata newReportURI
-    ) external override onlyReporter {
-        _recordNAVReport(newReportedAssets, newReportedAvailableLiquidity, 0, newReportHash, newReportURI, maxChangeBps);
     }
 
     function _approveVault(uint256 assets) internal {

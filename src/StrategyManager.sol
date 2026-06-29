@@ -6,7 +6,6 @@
 pragma solidity ^0.8.24;
 
 import {Caps} from "./interfaces/IVault.sol";
-import {IOffchainNAVStrategy} from "./interfaces/IOffchainNAVStrategy.sol";
 import {IOffchainStrategyStatus} from "./interfaces/IOffchainStrategyStatus.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IStrategyManager} from "./interfaces/IStrategyManager.sol";
@@ -164,7 +163,6 @@ contract StrategyManager is IStrategyManager, AccessManaged {
 
         // A strategy must be fully empty before removal — including any offchain/reported value,
         // so removal can never orphan funds still owed to the strategy.
-        require(getStrategyAssets(strategy) == 0, ErrorsLib.ZeroAllocation());
         require(IStrategy(strategy).totalAssets() == 0, ErrorsLib.ZeroAllocation());
 
         uint256 index = indexPlusOne - 1;
