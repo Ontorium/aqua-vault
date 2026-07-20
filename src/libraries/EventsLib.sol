@@ -19,12 +19,18 @@ library EventsLib {
     event Withdraw(
         address indexed sender, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares
     );
-    /// @dev Per-user accumulating queue (Centrifuge-style). No `requestId`: identity is the
-    /// `onBehalf` address; multiple queued requests for the same user merge into one slot.
-    event WithdrawalRequested(address indexed sender, address indexed onBehalf, uint256 assets, uint256 shares);
-    /// @dev Operator (ALLOCATOR_ROLE) moved a user's pending request into the reserved/claimable pool.
-    event WithdrawalFulfilled(address indexed onBehalf, uint256 assets);
-    event WithdrawalClaimed(address indexed onBehalf, uint256 assets);
+    /// @dev Per-receiver accumulating queue. No `requestId`: requests for the same receiver merge.
+    /// `onBehalf` identifies the account whose shares were burned for this submission.
+    event WithdrawalRequested(
+        address indexed sender,
+        address indexed onBehalf,
+        address indexed receiver,
+        uint256 assets,
+        uint256 shares
+    );
+    /// @dev Operator (ALLOCATOR_ROLE) moved a receiver's pending request into the reserved/claimable pool.
+    event WithdrawalFulfilled(address indexed receiver, uint256 assets);
+    event WithdrawalClaimed(address indexed receiver, uint256 assets);
 
     // Vault creation events
     event Constructor(address indexed owner, address indexed asset);

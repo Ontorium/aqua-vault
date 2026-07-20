@@ -12,4 +12,3 @@ uint256 constant MAX_MANAGEMENT_FEE = 0.05e18 / uint256(365 days); // 5%
 uint256 constant MAX_FORCE_DEALLOCATE_PENALTY = 0.02e18; // 2%
 uint256 constant MAX_DEPOSIT_FEE = 0.05e18; // 5%
 uint256 constant MAX_WITHDRAWAL_FEE = 0.05e18; // 5%
-uint256 constant MAX_MIN_REPORT_INTERVAL = 30 days;

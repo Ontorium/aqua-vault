@@ -14,7 +14,7 @@ struct Caps {
     uint128 relativeCap;
 }
 
-/// @dev Single storage slot per `onBehalf` (`uint128 + uint128 = 256 bits` packed). Subsequent queued
+/// @dev Single storage slot per `receiver` (`uint128 + uint128 = 256 bits` packed). Subsequent queued
 /// withdrawals accumulate into the same slot; a second `feeAtRequest` slot is added only when fees are
 /// active. Cleared via `delete` on claim/cancel for full refund.
 /// @dev `assets` is the gross amount owed (pre-withdrawal-fee); `feeAtRequest` snapshots the
@@ -57,12 +57,12 @@ interface IVault is IERC4626, IERC2612 {
     function depositFee() external view returns (uint96);
     function withdrawalFee() external view returns (uint96);
     function protocolFeeRecipient() external view returns (address);
-    function pendingWithdrawal(address onBehalf)
+    function pendingWithdrawal(address receiver)
         external
         view
         returns (uint128 assets, uint128 shares, uint64 feeAtRequest);
-    function claimableAssets(address onBehalf) external view returns (uint128);
-    function claimableFee(address onBehalf) external view returns (uint64);
+    function claimableAssets(address receiver) external view returns (uint128);
+    function claimableFee(address receiver) external view returns (uint64);
     function reservedAssets() external view returns (uint256);
     function pendingClaimableAssets() external view returns (uint256);
     function paused() external view returns (bool);
@@ -106,9 +106,9 @@ interface IVault is IERC4626, IERC2612 {
     /// @notice Batched allocate/deallocate to move capital between strategies in one call. Allocate legs
     /// respect the pause; deallocate (exit) legs remain available while paused.
     function rebalance(RebalanceAction[] calldata actions) external;
-    /// @notice Operator (ALLOCATOR_ROLE) moves each user's full pending request into their reserved
-    /// `claimableAssets`, locking liquidity per-user. Caller controls fulfillment order via the list.
-    function fulfillWithdrawal(address[] calldata onBehalfs) external;
+    /// @notice Operator (ALLOCATOR_ROLE) moves each receiver's full pending request into their reserved
+    /// `claimableAssets`, locking liquidity per receiver. Caller controls fulfillment order via the list.
+    function fulfillWithdrawal(address[] calldata receivers) external;
 
     // Exchange rate
     function accrueInterest() external;
@@ -118,11 +118,11 @@ interface IVault is IERC4626, IERC2612 {
         view
         returns (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares);
 
-    // Withdrawal queue (per-user, operator-fulfilled, ERC-7540 / Centrifuge style)
-    /// @notice Settles `onBehalf`'s fulfilled (reserved) withdrawal. Permissionless; assets always flow to
-    /// `onBehalf` (not to msg.sender). Only claimable after the operator calls {fulfillWithdrawal}.
-    function claim(address onBehalf) external returns (uint256 assets);
-    function isClaimable(address onBehalf) external view returns (bool);
+    // Withdrawal queue (per-receiver, operator-fulfilled, ERC-7540 / Centrifuge style)
+    /// @notice Settles `receiver`'s fulfilled (reserved) withdrawal. Permissionless; assets always flow to
+    /// `receiver` (not to msg.sender). Only claimable after the operator calls {fulfillWithdrawal}.
+    function claim(address receiver) external returns (uint256 assets);
+    function isClaimable(address receiver) external view returns (bool);
     function availableLiquidity() external view returns (uint256);
 
     // Force deallocate

@@ -3,10 +3,11 @@
 pragma solidity ^0.8.28;
 
 import "./BaseTest.sol";
+import {IReceiveAssetsGate} from "../src/interfaces/IGate.sol";
 
 /// @notice Covers the operator-fulfilled withdrawal queue (ERC-7540 / Centrifuge style). When idle is
-/// insufficient, shares are burned and the request accumulates into a per-user pending slot. A request is NOT
-/// claimable from liquidity alone — the ALLOCATOR must `fulfillWithdrawal`, which moves it into the user's
+/// insufficient, shares are burned and the request accumulates into a per-receiver pending slot. A request is NOT
+/// claimable from liquidity alone — the ALLOCATOR must `fulfillWithdrawal`, which moves it into the receiver's
 /// reserved `claimableAssets` and locks the backing liquidity. `claim` then pays out the reserved amount, so a
 /// fulfilled request can never be jumped by another user.
 contract WithdrawalQueueTest is BaseTest {
@@ -48,7 +49,7 @@ contract WithdrawalQueueTest is BaseTest {
         uint256 expectedShares = vault.previewWithdraw(wantAssets);
 
         vm.expectEmit(true, true, false, true);
-        emit EventsLib.WithdrawalRequested(alice, alice, wantAssets, expectedShares);
+        emit EventsLib.WithdrawalRequested(alice, alice, alice, wantAssets, expectedShares);
 
         vm.prank(alice);
         uint256 sharesBurned = vault.withdraw(wantAssets, alice, alice);
@@ -63,6 +64,154 @@ contract WithdrawalQueueTest is BaseTest {
         (uint128 pendingAssets, uint128 pendingShares,) = vault.pendingWithdrawal(alice);
         assertEq(uint256(pendingAssets), wantAssets, "pending assets");
         assertEq(uint256(pendingShares), sharesBurned, "pending shares");
+    }
+
+    /// @notice Once shares are burned, the queued obligation is keyed by and paid to `receiver`, not owner.
+    function testQueuedWithdrawalUsesReceiverAsQueueIdentity() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        address receiver = makeAddr("receiver");
+        uint256 wantAssets = 400e18;
+
+        vm.expectEmit(true, true, true, true);
+        emit EventsLib.WithdrawalRequested(alice, alice, receiver, wantAssets, vault.previewWithdraw(wantAssets));
+
+        vm.prank(alice);
+        vault.withdraw(wantAssets, receiver, alice);
+
+        (uint128 receiverPending,,) = vault.pendingWithdrawal(receiver);
+        (uint128 ownerPending,,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(receiverPending), wantAssets, "obligation keyed by receiver");
+        assertEq(uint256(ownerPending), 0, "owner has no queued obligation");
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", wantAssets);
+        _fulfill(receiver);
+
+        address anyone = makeAddr("anyone");
+        vm.prank(anyone);
+        uint256 received = vault.claim(receiver);
+
+        assertEq(received, wantAssets, "receiver claim amount");
+        assertEq(underlyingToken.balanceOf(receiver), wantAssets, "receiver paid");
+        assertEq(underlyingToken.balanceOf(alice), 0, "share owner not paid");
+    }
+
+    /// @notice Requests funded by different share owners merge when they name the same receiver.
+    function testDifferentOwnersAccumulateForSameReceiver() public {
+        address bob = makeAddr("bob");
+        address receiver = makeAddr("sharedReceiver");
+
+        _seed(500e18, 0);
+        underlyingToken.mint(bob, 500e18);
+        vm.startPrank(bob);
+        underlyingToken.approve(address(vault), 500e18);
+        vault.deposit(500e18, bob);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", 1_000e18);
+
+        vm.prank(alice);
+        vault.withdraw(200e18, receiver, alice);
+        vm.prank(bob);
+        vault.withdraw(300e18, receiver, bob);
+
+        (uint128 pendingAssets,,) = vault.pendingWithdrawal(receiver);
+        assertEq(uint256(pendingAssets), 500e18, "owners merge by receiver");
+        assertEq(vault.pendingClaimableAssets(), 500e18, "aggregate obligation");
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 500e18);
+        _fulfill(receiver);
+        assertEq(vault.claim(receiver), 500e18, "receiver claims merged requests");
+        assertEq(underlyingToken.balanceOf(receiver), 500e18, "receiver receives aggregate");
+    }
+
+    /// @notice A receiver blacklisted after queueing cannot bypass the asset-receive gate at claim time.
+    function testClaimRechecksReceiverGate() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        address receiver = makeAddr("receiver");
+        address gate = makeAddr("receiveAssetsGate");
+        vm.prank(governance);
+        vault.setReceiveAssetsGate(gate);
+
+        vm.mockCall(gate, abi.encodeCall(IReceiveAssetsGate.canReceiveAssets, (receiver)), abi.encode(true));
+        vm.prank(alice);
+        vault.withdraw(400e18, receiver, alice);
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 400e18);
+        _fulfill(receiver);
+
+        vm.mockCall(gate, abi.encodeCall(IReceiveAssetsGate.canReceiveAssets, (receiver)), abi.encode(false));
+        vm.expectRevert(ErrorsLib.CannotReceiveAssets.selector);
+        vault.claim(receiver);
+
+        assertEq(uint256(vault.claimableAssets(receiver)), 400e18, "claim remains reserved");
+    }
+
+    /// @notice Full fulfillment cannot reserve liquidity for a currently blocked receiver.
+    function testFulfillRechecksReceiverGate() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        address receiver = makeAddr("receiver");
+        address gate = makeAddr("receiveAssetsGate");
+        vm.prank(governance);
+        vault.setReceiveAssetsGate(gate);
+
+        vm.mockCall(gate, abi.encodeCall(IReceiveAssetsGate.canReceiveAssets, (receiver)), abi.encode(true));
+        vm.prank(alice);
+        vault.withdraw(400e18, receiver, alice);
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 400e18);
+
+        vm.mockCall(gate, abi.encodeCall(IReceiveAssetsGate.canReceiveAssets, (receiver)), abi.encode(false));
+        vm.expectRevert(ErrorsLib.CannotReceiveAssets.selector);
+        _fulfill(receiver);
+
+        (uint128 pendingAssets,,) = vault.pendingWithdrawal(receiver);
+        assertEq(uint256(pendingAssets), 400e18, "request remains pending");
+        assertEq(vault.reservedAssets(), 0, "blocked receiver reserves nothing");
+        assertEq(uint256(vault.claimableAssets(receiver)), 0, "blocked receiver is not claimable");
+    }
+
+    /// @notice Partial fulfillment applies the same receiver gate as full fulfillment.
+    function testPartialFulfillRechecksReceiverGate() public {
+        uint256 deposit = 1_000e18;
+        _seed(deposit, deposit);
+
+        address receiver = makeAddr("receiver");
+        address gate = makeAddr("receiveAssetsGate");
+        vm.prank(governance);
+        vault.setReceiveAssetsGate(gate);
+
+        vm.mockCall(gate, abi.encodeCall(IReceiveAssetsGate.canReceiveAssets, (receiver)), abi.encode(true));
+        vm.prank(alice);
+        vault.withdraw(400e18, receiver, alice);
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", 200e18);
+
+        vm.mockCall(gate, abi.encodeCall(IReceiveAssetsGate.canReceiveAssets, (receiver)), abi.encode(false));
+        address[] memory receivers = new address[](1);
+        receivers[0] = receiver;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 200e18;
+
+        vm.prank(allocator);
+        vm.expectRevert(ErrorsLib.CannotReceiveAssets.selector);
+        vault.fulfillWithdrawalPartial(receivers, amounts);
+
+        (uint128 pendingAssets,,) = vault.pendingWithdrawal(receiver);
+        assertEq(uint256(pendingAssets), 400e18, "request remains fully pending");
+        assertEq(vault.reservedAssets(), 0, "blocked receiver reserves nothing");
+        assertEq(uint256(vault.claimableAssets(receiver)), 0, "blocked receiver is not claimable");
     }
 
     /// @notice Two sequential withdraws by the same user collapse into one slot.
