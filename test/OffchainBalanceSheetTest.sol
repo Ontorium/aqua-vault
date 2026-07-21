@@ -70,6 +70,20 @@ contract OffchainBalanceSheetTest is BaseTest {
         assertEq(underlyingToken.balanceOf(address(strategy)), amount);
     }
 
+    function testForceDeallocateUnsupportedForOffchainStrategy() public {
+        uint256 amount = 100e18;
+        underlyingToken.mint(address(vault), amount);
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", amount);
+
+        vm.expectRevert(ErrorsLib.ForceDeallocateUnsupported.selector);
+        vault.forceDeallocate(address(strategy), hex"", amount, address(this));
+
+        assertEq(strategy.allocatedPrincipal(), amount, "allocation unchanged");
+        assertEq(underlyingToken.balanceOf(address(strategy)), amount, "strategy funds untouched");
+        assertEq(underlyingToken.balanceOf(address(vault)), 0, "nothing force-returned");
+    }
+
     function testDeployToCustodian(uint256 amount) public {
         amount = bound(amount, 1, type(uint96).max);
         underlyingToken.mint(address(vault), amount);

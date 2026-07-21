@@ -749,6 +749,10 @@ contract Vault is IVault, AccessManaged {
         external
         returns (uint256)
     {
+        require(
+            !IStrategyManager(strategyManager).isOffchainStrategy(strategy),
+            ErrorsLib.ForceDeallocateUnsupported()
+        );
         bytes32[] memory ids = deallocateInternal(strategy, data, assets);
 
         uint256 penaltyAssets = assets.mulDivUp(IStrategyManager(strategyManager).forceDeallocatePenalty(strategy), WAD);

@@ -25,6 +25,7 @@ library ErrorsLib {
     error DeallocationExceedsAllocation();
     error FeeInvariantBroken();
     error FeeTooHigh();
+    error ForceDeallocateUnsupported();
     error InsufficientLiquidity();
     error InvalidStrategyManager();
     error InvalidTarget();

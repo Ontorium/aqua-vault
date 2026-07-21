@@ -66,6 +66,10 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         return strategyConfig[strategy].active;
     }
 
+    function isOffchainStrategy(address strategy) external view returns (bool) {
+        return isStrategy(strategy) && strategyConfig[strategy].kind == STRATEGY_KIND_OFFCHAIN_NAV;
+    }
+
     /// @notice Returns whether any offchain NAV strategy is stale while still carrying offchain
     /// exposure. Vault entry is blocked in this state so stale marks cannot price new shares.
     function hasBlockingStaleOffchainExposure() external view returns (bool) {
