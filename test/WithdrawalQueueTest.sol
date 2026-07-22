@@ -601,7 +601,7 @@ contract WithdrawalQueueTest is BaseTest {
         vm.prank(alice);
         vault.withdraw(200e18, alice, alice);
 
-        // Locked fee should be the asset-weighted average of 0% and 2%, NOT 0 nor 2%.
+        // Pending assets are not final yet, so the locked fee is share-weighted, NOT fixed to 0% or 2%.
         (uint128 pendingAssets,, uint64 lockedFee) = vault.pendingWithdrawal(alice);
         assertGt(uint256(lockedFee), 0, "locked fee should reflect the 2% submission");
         assertLt(uint256(lockedFee), 0.02e18, "locked fee should be below the latest 2%");
@@ -618,6 +618,49 @@ contract WithdrawalQueueTest is BaseTest {
         // Protocol should have received the fee implied by the locked rate, not the current rate.
         uint256 expectedFee = (uint256(pendingAssets) * uint256(lockedFee) + 1e18 - 1) / 1e18; // mulDivUp
         assertEq(underlyingToken.balanceOf(protocolRecipient), expectedFee, "fee = stored_gross * lockedFee");
+    }
+
+    /// @notice Pending requests blend fees by shares because their asset values are not fixed until fulfillment.
+    /// A non-unit share price makes this test fail if request aggregation silently switches back to asset weights.
+    /// forge-config: default.isolate = true
+    function testQueuedFeeBlendsBySharesAtNonUnitPrice() public {
+        address protocolRecipient = makeAddr("nonUnitFeeRecipient");
+        vm.startPrank(governance);
+        vault.setProtocolFeeRecipient(protocolRecipient);
+        vault.setWithdrawalFee(0.01e18);
+        vm.stopPrank();
+
+        _seed(1_000e18, 1_000e18);
+
+        vm.prank(alice);
+        vault.redeem(100e18, alice, alice);
+
+        strategy.setInterest(100e18);
+        underlyingToken.mint(address(strategy), 100e18);
+        vm.prank(governance);
+        vault.forceSyncReportedNAV();
+
+        vm.prank(governance);
+        vault.setWithdrawalFee(0.03e18);
+        vm.prank(alice);
+        vault.redeem(200e18, alice, alice);
+
+        (, uint128 pendingShares, uint64 lockedFee) = vault.pendingWithdrawal(alice);
+        uint256 expectedLockedFee =
+            (uint256(100e18) * uint256(0.01e18) + uint256(200e18) * uint256(0.03e18)) / uint256(300e18);
+        assertEq(uint256(pendingShares), 300e18, "requests aggregate in shares");
+        assertEq(uint256(lockedFee), expectedLockedFee, "pending fee is share-weighted");
+
+        uint256 grossAtFulfillment = vault.convertToAssets(pendingShares);
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", grossAtFulfillment);
+        _fulfill(alice);
+
+        uint256 expectedFee = (grossAtFulfillment * expectedLockedFee + WAD - 1) / WAD;
+        uint256 aliceBefore = underlyingToken.balanceOf(alice);
+        assertEq(vault.claim(alice), grossAtFulfillment - expectedFee, "claim applies blended fee to final assets");
+        assertEq(underlyingToken.balanceOf(alice) - aliceBefore, grossAtFulfillment - expectedFee, "receiver gets net");
+        assertEq(underlyingToken.balanceOf(protocolRecipient), expectedFee, "protocol gets blended fee");
     }
 
     /// @notice The operator controls fulfillment order and reserved funds cannot be jumped: once alice is
@@ -982,6 +1025,65 @@ contract WithdrawalQueueTest is BaseTest {
         // Alice claims the accumulated 700 in one shot.
         vault.claim(alice);
         assertEq(underlyingToken.balanceOf(alice), 700e18, "received accumulated");
+    }
+
+    /// @notice Claimable fee aggregation is asset-weighted when partial fills occur at different NAVs.
+    /// Pending fee aggregation remains share-weighted until each tranche receives its final asset value.
+    /// forge-config: default.isolate = true
+    function testPartialFulfillsAtDifferentPricesBlendClaimableFeeByAssets() public {
+        address protocolRecipient = makeAddr("partialFeeRecipient");
+        vm.startPrank(governance);
+        vault.setProtocolFeeRecipient(protocolRecipient);
+        vault.setWithdrawalFee(0.01e18);
+        vm.stopPrank();
+
+        _seed(1_000e18, 1_000e18);
+        vm.prank(alice);
+        vault.redeem(200e18, alice, alice);
+
+        address[] memory receivers = new address[](1);
+        uint256[] memory shares = new uint256[](1);
+        receivers[0] = alice;
+        shares[0] = 100e18;
+
+        uint256 firstGross = vault.convertToAssets(shares[0]);
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", firstGross);
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(receivers, shares);
+        assertEq(uint256(vault.claimableFee(alice)), 0.01e18, "first tranche keeps 1% fee");
+
+        vm.prank(governance);
+        vault.setWithdrawalFee(0.03e18);
+        vm.prank(alice);
+        vault.redeem(100e18, alice, alice);
+        (,, uint64 secondPendingFee) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(secondPendingFee), 0.02e18, "remaining 1% and new 3% shares blend to 2%");
+
+        strategy.setInterest(100e18);
+        underlyingToken.mint(address(strategy), 100e18);
+        vm.prank(governance);
+        vault.forceSyncReportedNAV();
+
+        uint256 secondGross = vault.convertToAssets(shares[0]);
+        assertGt(secondGross, firstGross, "second tranche settles at higher NAV");
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", secondGross);
+        vm.prank(allocator);
+        vault.fulfillWithdrawalPartial(receivers, shares);
+
+        uint256 totalGross = firstGross + secondGross;
+        uint256 expectedClaimableFee =
+            (firstGross * 0.01e18 + secondGross * uint256(secondPendingFee)) / totalGross;
+        assertEq(uint256(vault.claimableAssets(alice)), totalGross, "claimable assets accumulate by tranche value");
+        assertEq(uint256(vault.claimableFee(alice)), expectedClaimableFee, "claimable fee is asset-weighted");
+
+        uint256 expectedFee = (totalGross * expectedClaimableFee + WAD - 1) / WAD;
+        assertEq(vault.claim(alice), totalGross - expectedFee, "claim pays net accumulated assets");
+        assertEq(underlyingToken.balanceOf(protocolRecipient), expectedFee, "protocol receives accumulated fee");
+
+        (, uint128 remainingShares,) = vault.pendingWithdrawal(alice);
+        assertEq(uint256(remainingShares), 100e18, "unfulfilled shares remain pending");
     }
 
     /// @notice Three users queue different amounts. After the operator fulfills all of them, each user can

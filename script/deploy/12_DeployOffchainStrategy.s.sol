@@ -34,7 +34,6 @@ import {DeployConfig} from "../DeployConfig.sol";
 /// Optional env:
 ///   CUSTODIAN            offchain custodian EOA. Defaults to signer (TESTNET ONLY; replace before mainnet).
 ///   STALE_PERIOD         max age of a NAV report before strategy falls back to onchain idle. Default 7 days.
-///   MIN_REPORT_INTERVAL  rate-limit between reports. Default 1 hour.
 ///   MAX_CHANGE_BPS       max single-report NAV change in basis points (10000 = 100%). Default 1000 (10%).
 ///
 /// Usage (USDT vault):
@@ -56,8 +55,7 @@ contract DeployOffchainStrategy is EnvSigner, DeployConfig {
         // Knobs (with sensible testnet defaults). custodian: CUSTODIAN env > config.custodian > signer.
         address custodian = vm.envOr("CUSTODIAN", address(0));
         if (custodian == address(0)) custodian = c.custodian;
-        uint256 stalePeriod = vm.envOr("STALE_PERIOD", uint256(7 days));
-        uint256 minReportInterval = vm.envOr("MIN_REPORT_INTERVAL", uint256(1 hours));
+        uint256 stalePeriod = vm.envOr("STALE_PERIOD", uint256(1 days));
         uint256 maxChangeBps = vm.envOr("MAX_CHANGE_BPS", uint256(1000)); // 10%
 
         address signer = _startBroadcastFromEnv();
@@ -65,7 +63,7 @@ contract DeployOffchainStrategy is EnvSigner, DeployConfig {
 
         // 1. Deploy strategy.
         OffchainNAVStrategy strategy = new OffchainNAVStrategy(
-            vaultAddr, asset, rmAddr, custodian, stalePeriod, minReportInterval, maxChangeBps
+            vaultAddr, asset, rmAddr, custodian, stalePeriod, maxChangeBps
         );
 
         // 2. Self-grant vault-scoped GOVERNANCE so we can register + lift caps.
@@ -101,7 +99,6 @@ contract DeployOffchainStrategy is EnvSigner, DeployConfig {
         console.log("strategyManager      :", smAddr);
         console.log("custodian            :", custodian);
         console.log("stalePeriod (sec)    :", stalePeriod);
-        console.log("minReportInterval(s) :", minReportInterval);
         console.log("maxChangeBps         :", maxChangeBps);
         console.log("offchainManager      :", c.offchainManager, c.offchainManager == address(0) ? "(not granted)" : "(granted)");
         console.log("offchainReporter     :", c.offchainReporter, c.offchainReporter == address(0) ? "(not granted)" : "(granted)");
