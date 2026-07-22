@@ -263,10 +263,10 @@ contract ScenarioReport is EnvSigner, StdCheats {
     }
 
     /// @dev Fork-only: deploys an OffchainNAVStrategy with the signer as custodian for simulation.
-    /// Default knobs: stalePeriod 7 days, minReportInterval 1 hour, maxChangeBps 1000 (10%).
+    /// Default knobs: stalePeriod 7 days, maxChangeBps 1000 (10%).
     function _deployAndWireOffchain() internal {
         offchain = new OffchainNAVStrategy(
-            address(vault), address(asset), address(rm), custodian, 7 days, 1 hours, 1000
+            address(vault), address(asset), address(rm), custodian, 7 days, 1000
         );
 
         bytes32 gov = rm.getScopedRole(address(vault), "GOVERNANCE_ROLE");
@@ -329,10 +329,6 @@ contract ScenarioReport is EnvSigner, StdCheats {
             if (offchain.custodian() != custodian) {
                 offchain.setCustodian(custodian);
                 console.log("[setup] strategy.setCustodian ->", custodian);
-            }
-            if (offchain.minReportInterval() > 0) {
-                offchain.setMinReportInterval(0);
-                console.log("[setup] offchain.minReportInterval = 0");
             }
             if (offchain.maxChangeBps() < 10_000) {
                 offchain.setMaxChangeBps(10_000);

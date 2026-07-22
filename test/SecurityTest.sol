@@ -77,11 +77,10 @@ contract SecurityTest is BaseTest {
         assertEq(vault.totalAssets(), 1, "donation invisible without maxRate");
     }
 
-    /* ── PENDING WITHDRAWAL PRICE LOCK ────────────────────────────────────────── */
+    /* ── PENDING WITHDRAWAL FULFILLMENT PRICING ───────────────────────────────── */
 
-    /// @notice A queued withdrawal request records assets at burn time. Subsequent price moves must
-    /// not change what the queued user is owed.
-    function testQueuedWithdrawalLockedAtRequestPrice() public {
+    /// @notice A queued request escrows shares, so subsequent gains are reflected at fulfillment.
+    function testQueuedWithdrawalPricedAtFulfillment() public {
         // Setup: victim deposits, allocator drains idle so the next withdrawal queues.
         uint256 deposit = 1_000e18;
         underlyingToken.mint(victim, deposit);
@@ -93,34 +92,31 @@ contract SecurityTest is BaseTest {
         vm.prank(allocator);
         vault.allocate(address(strategy), hex"", deposit);
 
-        // Victim requests withdraw of 400; it queues at the current share price.
+        // Victim requests withdraw of 400; assets are only an estimate at this point.
         uint256 wantAssets = 400e18;
         vm.prank(victim);
         vault.withdraw(wantAssets, victim, victim);
 
-        (uint128 lockedAssets,,) = vault.pendingWithdrawal(victim);
-        assertEq(uint256(lockedAssets), wantAssets, "assets locked at request");
+        uint256 requestEstimate = vault.previewPendingWithdrawal(victim);
+        assertEq(requestEstimate, wantAssets, "initial estimate");
 
-        // Massive interest accrues — share price doubles.
-        vm.prank(governance);
-        vault.setMaxRate(MAX_MAX_RATE);
+        // The strategy reports a gain and governance synchronizes the latest NAV.
         strategy.setInterest(deposit); // doubles strategy reported assets
-        skip(365 days);
-        vault.accrueInterest();
+        vm.prank(governance);
+        vault.forceSyncReportedNAV();
 
-        // The queued request still owes exactly wantAssets — gains do NOT flow to pending requesters.
-        (uint128 lockedAssetsAfter,,) = vault.pendingWithdrawal(victim);
-        assertEq(uint256(lockedAssetsAfter), wantAssets, "still locked at original");
+        uint256 fulfillmentEstimate = vault.previewPendingWithdrawal(victim);
+        assertGt(fulfillmentEstimate, requestEstimate, "escrowed shares receive gains");
 
-        // Bring liquidity back, operator fulfills, then claim — victim gets exactly the locked amount.
+        // Bring liquidity back, operator fulfills, then claim at the updated price.
         vm.prank(allocator);
-        vault.deallocate(address(strategy), hex"", wantAssets);
+        vault.deallocate(address(strategy), hex"", fulfillmentEstimate);
         address[] memory toFulfill = new address[](1);
         toFulfill[0] = victim;
         vm.prank(allocator);
         vault.fulfillWithdrawal(toFulfill);
         uint256 received = vault.claim(victim);
-        assertEq(received, wantAssets, "received the locked amount");
+        assertEq(received, fulfillmentEstimate, "received fulfillment-time amount");
     }
 
     /* ── PAUSE ASYMMETRY ─────────────────────────────────────────────────────── */
@@ -157,7 +153,7 @@ contract SecurityTest is BaseTest {
         vm.prank(sentinel);
         vault.pause();
 
-        // Withdraw still works (immediate path because idle is full).
+        // Immediate withdraw remains available under pause.
         vm.prank(victim);
         uint256 sharesBurned = vault.withdraw(500e18, victim, victim);
         assertGt(sharesBurned, 0, "withdraw open under pause");

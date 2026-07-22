@@ -18,6 +18,7 @@ contract StrategyManagerTest is BaseTest {
         assertEq(strategyManager.asset(), address(underlyingToken));
         assertEq(strategyManager.strategyRegistry(), address(0));
         assertEq(strategyManager.strategiesLength(), 0);
+        assertFalse(strategyManager.hasBlockingStaleOffchainExposure());
     }
 
     function testAddStrategyRequiresGovernance(address rdm) public {
@@ -43,6 +44,7 @@ contract StrategyManagerTest is BaseTest {
         assertTrue(info.config.active);
         assertEq(info.config.targetBps, 200);
         assertEq(info.config.kind, 1);
+        assertFalse(strategyManager.hasBlockingStaleOffchainExposure(), "onchain strategy has no NAV staleness");
     }
 
     function testAddStrategyRejectsZero() public {

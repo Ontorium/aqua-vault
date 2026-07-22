@@ -26,7 +26,6 @@ contract OffchainBalanceSheetTest is BaseTest {
             _roleManager: address(roleManager),
             _custodian: custodian,
             _stalePeriod: 1 days,
-            _minReportInterval: 0,
             _maxChangeBps: 0 // 0 disables max-change check; specific tests opt back in
         });
 
@@ -51,12 +50,15 @@ contract OffchainBalanceSheetTest is BaseTest {
         assertEq(strategy.asset(), address(underlyingToken));
         assertEq(strategy.custodian(), custodian);
         assertEq(strategy.stalePeriod(), 1 days);
-        assertEq(strategy.minReportInterval(), 0);
         assertEq(strategy.allocatedPrincipal(), 0);
         assertEq(strategy.deployedPrincipal(), 0);
         assertEq(strategy.reportedAssets(), 0);
         // No report yet — must be considered stale.
         assertTrue(strategy.isStale());
+        assertFalse(
+            strategyManager.hasBlockingStaleOffchainExposure(),
+            "stale strategy without offchain exposure does not block"
+        );
     }
 
     function testAllocateRecordsPrincipal(uint256 amount) public {
@@ -68,6 +70,20 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         assertEq(strategy.allocatedPrincipal(), amount);
         assertEq(underlyingToken.balanceOf(address(strategy)), amount);
+    }
+
+    function testForceDeallocateUnsupportedForOffchainStrategy() public {
+        uint256 amount = 100e18;
+        underlyingToken.mint(address(vault), amount);
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", amount);
+
+        vm.expectRevert(ErrorsLib.ForceDeallocateUnsupported.selector);
+        vault.forceDeallocate(address(strategy), hex"", amount, address(this));
+
+        assertEq(strategy.allocatedPrincipal(), amount, "allocation unchanged");
+        assertEq(underlyingToken.balanceOf(address(strategy)), amount, "strategy funds untouched");
+        assertEq(underlyingToken.balanceOf(address(vault)), 0, "nothing force-returned");
     }
 
     function testDeployToCustodian(uint256 amount) public {
@@ -124,6 +140,7 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         // A year later the custodian reports a 10% NAV gain.
         skip(365 days);
+        vm.roll(block.number + 1);
         vm.prank(reporter);
         strategy.report(deposit + 100e18, 0, 0, keccak256("gain"), "ipfs://gain");
         vault.accrueInterest();
@@ -154,28 +171,27 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         // A fresh report restores liveness.
         bytes32 hash2 = keccak256("r2");
+        vm.roll(block.number + 1);
         vm.prank(reporter);
         strategy.report(navAfter, 0, 0, hash2, "ipfs://2");
         assertFalse(strategy.isStale());
         assertEq(strategy.reportedAssets(), navAfter);
     }
 
-    function testReportRespectsMinInterval() public {
-        // Tighten stalePeriod separately so it doesn't interact; set minInterval to 1h.
-        vm.prank(governance);
-        strategy.setMinReportInterval(1 hours);
-
+    function testReportRejectsSecondSubmissionInSameBlock() public {
         vm.prank(reporter);
         strategy.report(1e18, 0, 0, keccak256("r0"), "");
 
-        // Immediate second report must revert.
-        vm.expectRevert(ErrorsLib.ReportTooSoon.selector);
+        vm.expectRevert(ErrorsLib.ReportAlreadySubmittedThisBlock.selector);
         vm.prank(reporter);
         strategy.report(1e18, 0, 0, keccak256("r1"), "");
 
-        skip(1 hours);
+        assertEq(strategy.reportHash(), keccak256("r0"), "first report remains active");
+
+        vm.roll(block.number + 1);
         vm.prank(reporter);
-        strategy.report(1e18, 0, 0, keccak256("r2"), "");
+        strategy.report(1e18, 0, 0, keccak256("r1"), "");
+        assertEq(strategy.reportHash(), keccak256("r1"), "next-block report accepted");
     }
 
     function testReportRejectsLiquidityAboveAssets() public {
@@ -193,6 +209,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.report(1_000e18, 0, 0, keccak256("r0"), "");
 
         // Trying to jump 50% must revert.
+        vm.roll(block.number + 1);
         vm.expectRevert(ErrorsLib.MaxChangeExceeded.selector);
         vm.prank(reporter);
         strategy.report(1_500e18, 0, 0, keccak256("r1"), "");
@@ -384,6 +401,97 @@ contract OffchainBalanceSheetTest is BaseTest {
         vm.expectRevert(ErrorsLib.StaleOffchainStrategy.selector);
         vault.mint(100e18, attacker);
         vm.stopPrank();
+    }
+
+    /// @notice A stale offchain mark routes an otherwise liquid exit into the queue. A fresh report is
+    /// required before the allocator can price and fulfill the escrowed shares.
+    /// forge-config: default.isolate = true
+    function testStaleOffchainExposureQueuesLiquidWithdrawalUntilFreshReport() public {
+        uint256 deposit = 1_000e18;
+        uint256 deployed = 100e18;
+        uint256 requested = 200e18;
+        address user = makeAddr("staleExitUser");
+
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        uint256 userShares = vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deployed);
+        vm.prank(manager);
+        strategy.deployToCustodian(deployed);
+        vm.prank(reporter);
+        strategy.report(deployed, 0, 0, keccak256("initial"), "ipfs://initial");
+        assertFalse(strategyManager.hasBlockingStaleOffchainExposure(), "fresh exposure does not block");
+
+        skip(1 days + 1);
+        assertTrue(strategy.isStale(), "offchain NAV is stale");
+        assertTrue(strategyManager.hasBlockingStaleOffchainExposure(), "stale exposure blocks pricing");
+        assertEq(underlyingToken.balanceOf(address(vault)), deposit - deployed, "idle covers request");
+
+        uint256 expectedShares = vault.previewWithdraw(requested);
+        vm.prank(user);
+        uint256 queuedShares = vault.withdraw(requested, user, user);
+
+        assertEq(queuedShares, expectedShares, "request uses estimated shares");
+        assertEq(underlyingToken.balanceOf(user), 0, "stale exit is not paid immediately");
+        assertEq(vault.balanceOf(user), userShares - queuedShares, "shares removed from user custody");
+        assertEq(vault.balanceOf(address(vault)), queuedShares, "shares escrowed in vault");
+        (uint128 pendingAssets, uint128 pendingShares,) = vault.pendingWithdrawal(user);
+        assertEq(uint256(pendingAssets), requested, "request-time asset estimate stored");
+        assertEq(uint256(pendingShares), queuedShares, "pending shares stored");
+
+        address[] memory receivers = new address[](1);
+        receivers[0] = user;
+        vm.prank(allocator);
+        vm.expectRevert(ErrorsLib.StaleOffchainStrategy.selector);
+        vault.fulfillWithdrawal(receivers);
+
+        uint256[] memory partialShares = new uint256[](1);
+        partialShares[0] = queuedShares / 2;
+        vm.prank(allocator);
+        vm.expectRevert(ErrorsLib.StaleOffchainStrategy.selector);
+        vault.fulfillWithdrawalPartial(receivers, partialShares);
+
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(deployed, 0, 0, keccak256("fresh"), "ipfs://fresh");
+        assertFalse(strategyManager.hasBlockingStaleOffchainExposure(), "fresh report clears block");
+        vm.prank(allocator);
+        vault.fulfillWithdrawal(receivers);
+
+        assertEq(vault.claim(user), requested, "fresh NAV settlement is claimable");
+        assertEq(underlyingToken.balanceOf(user), requested, "user receives fixed claim amount");
+    }
+
+    /// @notice Fresh offchain exposure does not disable the normal immediate path when idle is sufficient.
+    function testFreshOffchainExposureAllowsLiquidImmediateWithdrawal() public {
+        uint256 deposit = 1_000e18;
+        uint256 deployed = 100e18;
+        uint256 requested = 200e18;
+        address user = makeAddr("freshExitUser");
+
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deployed);
+        vm.prank(manager);
+        strategy.deployToCustodian(deployed);
+        vm.prank(reporter);
+        strategy.report(deployed, 0, 0, keccak256("fresh-immediate"), "ipfs://fresh-immediate");
+
+        vm.prank(user);
+        vault.withdraw(requested, user, user);
+
+        assertEq(underlyingToken.balanceOf(user), requested, "fresh liquid exit pays immediately");
+        (, uint128 pendingShares,) = vault.pendingWithdrawal(user);
+        assertEq(uint256(pendingShares), 0, "no queue entry created");
     }
 
     /* ── skim (defensive token recovery) ──────────────────────────────────────── */

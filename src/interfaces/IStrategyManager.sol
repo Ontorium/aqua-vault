@@ -45,6 +45,7 @@ interface IStrategyManager {
     function strategies(uint256 index) external view returns (address);
     function isStrategy(address strategy) external view returns (bool);
     function isStrategyActive(address strategy) external view returns (bool);
+    function isOffchainStrategy(address strategy) external view returns (bool);
 
     function strategyRegistry() external view returns (address);
     function getStrategyAssets(address strategy) external view returns (uint256);

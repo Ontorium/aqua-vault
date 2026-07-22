@@ -25,6 +25,7 @@ library ErrorsLib {
     error DeallocationExceedsAllocation();
     error FeeInvariantBroken();
     error FeeTooHigh();
+    error ForceDeallocateUnsupported();
     error InsufficientLiquidity();
     error InvalidStrategyManager();
     error InvalidTarget();
@@ -46,7 +47,7 @@ library ErrorsLib {
     error RequestExceedsAvailableLiquidity();
     error RequestExceedsReportedAssets();
     error RequestNotPending();
-    error ReportTooSoon();
+    error ReportAlreadySubmittedThisBlock();
     error ReturnNotReceived();
     error StaleOffchainStrategy();
     error TimelockNotDecreasing();
