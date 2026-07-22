@@ -83,7 +83,7 @@ contract Vault is IVault, AccessManaged {
     mapping(address receiver => ClaimableWithdrawal) internal _claimableWithdrawal;
     /// @dev Total assets reserved for fulfilled withdrawals.
     uint256 public reservedAssets;
-    /// @dev Total assets owed to queued or fulfilled withdrawals.
+    /// @dev Total asset liabilities fixed at fulfillment and awaiting claim. Pending share requests are excluded.
     uint256 public pendingClaimableAssets;
 
     /* PAUSE STORAGE */
@@ -111,6 +111,16 @@ contract Vault is IVault, AccessManaged {
 
     function claimableFee(address receiver) external view returns (uint64) {
         return _claimableWithdrawal[receiver].fee;
+    }
+
+    /// @notice Current net-asset estimate for a pending share request. Final assets are fixed only at fulfillment.
+    function previewPendingWithdrawal(address receiver) external view returns (uint256) {
+        PendingWithdrawal memory p = pendingWithdrawal[receiver];
+        if (p.shares == 0) return 0;
+        (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares) = accrueInterestView();
+        uint256 newTotalSupply = totalSupply + performanceFeeShares + managementFeeShares;
+        uint256 grossAssets = uint256(p.shares).mulDivDown(newTotalAssets + 1, newTotalSupply + virtualShares);
+        return grossAssets - grossAssets.mulDivUp(p.feeAtRequest, WAD);
     }
 
     /// forge-lint: disable-next-item(mixed-case-function)
@@ -424,18 +434,21 @@ contract Vault is IVault, AccessManaged {
     }
 
     function _realAssets() internal view returns (uint256 realAssets) {
-        // Subtract pending claims — they no longer belong to share holders.
-        realAssets = IERC20(asset).balanceOf(address(this))
-            .zeroFloorSub(pendingClaimableAssets);
+        // Pending share requests remain shareholder capital until fulfillment. Only fixed claimable
+        // asset liabilities are excluded from shareholder NAV.
+        realAssets = IERC20(asset).balanceOf(address(this));
         if (strategyManager != address(0)) realAssets += IStrategyManager(strategyManager).totalStrategyAssets();
+        realAssets = realAssets.zeroFloorSub(pendingClaimableAssets);
     }
 
-    function _requireFreshOffchainStrategiesForEntry() internal view {
+    function _hasBlockingStaleOffchainExposure() internal view returns (bool) {
         address _strategyManager = strategyManager;
-        if (_strategyManager == address(0)) return;
-        if (IStrategyManager(_strategyManager).hasBlockingStaleOffchainExposure()) {
-            revert ErrorsLib.StaleOffchainStrategy();
-        }
+        return _strategyManager != address(0)
+            && IStrategyManager(_strategyManager).hasBlockingStaleOffchainExposure();
+    }
+
+    function _requireFreshOffchainStrategies() internal view {
+        if (_hasBlockingStaleOffchainExposure()) revert ErrorsLib.StaleOffchainStrategy();
     }
 
     function _blendFee(uint256 oldAmt, uint64 oldFee, uint256 newAmt, uint64 newFee) internal pure returns (uint64) {
@@ -516,7 +529,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Charges `depositFee` and mints shares against the net assets.
     function deposit(uint256 assets, address onBehalf) external whenNotPaused returns (uint256) {
-        _requireFreshOffchainStrategiesForEntry();
+        _requireFreshOffchainStrategies();
         accrueInterest();
         uint256 shares = previewDeposit(assets);
         uint256 fee = assets.mulDivUp(depositFee, WAD);
@@ -527,7 +540,7 @@ contract Vault is IVault, AccessManaged {
 
     /// @dev Mints `shares` to `onBehalf` for the required gross assets.
     function mint(uint256 shares, address onBehalf) external whenNotPaused returns (uint256) {
-        _requireFreshOffchainStrategiesForEntry();
+        _requireFreshOffchainStrategies();
         accrueInterest();
         uint256 grossAssets = previewMint(shares);
         uint256 fee = grossAssets.mulDivUp(depositFee, WAD);
@@ -551,7 +564,7 @@ contract Vault is IVault, AccessManaged {
         emit EventsLib.Deposit(msg.sender, onBehalf, netAssets, shares);
     }
 
-    /// @dev Withdraws `assets` net of fees to `receiver`.
+    /// @dev Settles immediately when idle liquidity is sufficient; otherwise queues shares for later pricing.
     function withdraw(uint256 assets, address receiver, address onBehalf) public returns (uint256) {
         accrueInterest();
         uint256 shares = previewWithdraw(assets);
@@ -561,7 +574,7 @@ contract Vault is IVault, AccessManaged {
         return shares;
     }
 
-    /// @dev Redeems `shares` from `onBehalf`.
+    /// @dev Settles immediately when idle liquidity is sufficient; otherwise queues shares for later pricing.
     function redeem(uint256 shares, address receiver, address onBehalf) external returns (uint256) {
         accrueInterest();
         uint256 netAssets = previewRedeem(shares);
@@ -571,16 +584,17 @@ contract Vault is IVault, AccessManaged {
         return netAssets;
     }
 
-    /// @dev Internal exit path for withdrawals and redeems.
-    /// Uses the queue when idle liquidity is insufficient.
+    /// @dev Immediate exits burn at the request-time price. Only liquidity-short exits escrow shares;
+    /// their request-time asset value is an estimate and the final value is set by fulfillment.
     function _exit(
-        uint256 assetsOut,
+        uint256 grossAssets,
         uint256 netAssets,
         uint256 fee,
         uint256 shares,
         address receiver,
         address onBehalf
     ) internal {
+        require(onBehalf != address(0), ErrorsLib.ZeroAddress());
         require(canSendShares(onBehalf), ErrorsLib.CannotSendShares());
         require(canReceiveAssets(receiver), ErrorsLib.CannotReceiveAssets());
 
@@ -589,14 +603,13 @@ contract Vault is IVault, AccessManaged {
             if (_allowance != type(uint256).max) allowance[onBehalf][msg.sender] = _allowance - shares;
         }
 
-        deleteShares(onBehalf, shares);
-        _totalAssets -= assetsOut.toUint128();
+        uint256 effectiveIdle = IERC20(asset).balanceOf(address(this)).zeroFloorSub(pendingClaimableAssets);
+        if (effectiveIdle >= grossAssets && !_hasBlockingStaleOffchainExposure()) {
+            // Only fresh request-time prices may settle immediately. A stale offchain mark forces the
+            // request into the queue even when idle liquidity is sufficient.
+            deleteShares(onBehalf, shares);
+            _totalAssets -= grossAssets.toUint128();
 
-        uint256 idleAssets = IERC20(asset).balanceOf(address(this));
-        uint256 effectiveIdle = idleAssets.zeroFloorSub(pendingClaimableAssets);
-
-        if (effectiveIdle >= assetsOut) {
-            // Immediate settlement.
             if (fee > 0) {
                 require(protocolFeeRecipient != address(0), ErrorsLib.FeeInvariantBroken());
                 SafeERC20Lib.safeTransfer(asset, protocolFeeRecipient, fee);
@@ -604,44 +617,56 @@ contract Vault is IVault, AccessManaged {
             SafeERC20Lib.safeTransfer(asset, receiver, netAssets);
             emit EventsLib.Withdraw(msg.sender, receiver, onBehalf, netAssets, shares);
         } else {
-            // Queue settlement and snapshot the fee in effect for this request.
+            // Escrow rather than burn. Queued shares participate in gains/losses until fulfillment.
+            balanceOf[onBehalf] -= shares;
+            balanceOf[address(this)] += shares;
+            emit EventsLib.Transfer(onBehalf, address(this), shares);
+
             PendingWithdrawal storage p = pendingWithdrawal[receiver];
-            uint256 oldAssets = p.assets;
-            uint64 newFee = uint64(withdrawalFee);
-            p.feeAtRequest = _blendFee(oldAssets, p.feeAtRequest, assetsOut, newFee);
-            p.assets = (oldAssets + assetsOut).toUint128();
-            p.shares = (uint256(p.shares) + shares).toUint128();
-            pendingClaimableAssets += assetsOut;
-            emit EventsLib.WithdrawalRequested(msg.sender, onBehalf, receiver, assetsOut, shares);
+            uint256 oldShares = p.shares;
+            p.feeAtRequest = _blendFee(oldShares, p.feeAtRequest, shares, uint64(withdrawalFee));
+            p.assets = (uint256(p.assets) + grossAssets).toUint128();
+            p.shares = (oldShares + shares).toUint128();
+
+            emit EventsLib.WithdrawalRequested(msg.sender, onBehalf, receiver, grossAssets, shares);
         }
     }
 
-    /// @notice Moves pending withdrawals into claimable balances.
-    /// @dev Requires enough unreserved idle liquidity for each request.
+    /// @notice Prices and moves pending withdrawals into fixed claimable balances.
+    /// @dev Requires fresh offchain NAV and enough unreserved idle liquidity for each request.
     function fulfillWithdrawal(address[] calldata receivers) external onlyRole(ALLOCATOR_ROLE) {
+        _requireFreshOffchainStrategies();
+        accrueInterest();
+
         uint256 len = receivers.length;
         IERC20 assetToken = IERC20(asset);
         uint256 balance = assetToken.balanceOf(address(this));
         uint256 reserved = reservedAssets;
         uint256 newReserved = reserved;
+        uint256 settlementTotalAssets = _totalAssets;
+        uint256 settlementTotalSupply = totalSupply;
 
         for (uint256 i; i < len;) {
             address receiver = receivers[i];
             require(canReceiveAssets(receiver), ErrorsLib.CannotReceiveAssets());
             PendingWithdrawal memory p = pendingWithdrawal[receiver];
-            uint256 amt = p.assets;
-            require(amt > 0, ErrorsLib.RequestNotPending());
+            uint256 shares = p.shares;
+            require(shares > 0, ErrorsLib.RequestNotPending());
+            uint256 amt = _convertToAssetsSettled(shares, settlementTotalAssets, settlementTotalSupply);
             require(balance - newReserved >= amt, ErrorsLib.InsufficientLiquidity());
 
             newReserved += amt;
+            pendingClaimableAssets += amt;
+            _totalAssets -= amt.toUint128();
+            deleteShares(address(this), shares);
 
             // Merge the queued fee snapshot into the claimable balance.
             ClaimableWithdrawal storage claimable = _claimableWithdrawal[receiver];
             uint256 oldClaim = claimable.assets;
             claimable.fee = _blendFee(oldClaim, claimable.fee, amt, p.feeAtRequest);
-            claimable.assets = uint128(oldClaim + amt);
+            claimable.assets = (oldClaim + amt).toUint128();
             delete pendingWithdrawal[receiver];
-            emit EventsLib.WithdrawalFulfilled(receiver, amt);
+            emit EventsLib.WithdrawalFulfilled(receiver, amt, shares);
             unchecked {
                 ++i;
             }
@@ -650,56 +675,71 @@ contract Vault is IVault, AccessManaged {
         if (newReserved != reserved) reservedAssets = newReserved;
     }
 
-    /// @notice Partially fulfills pending withdrawals.
-    /// @dev Any remaining balance stays queued with the original fee snapshot.
-    function fulfillWithdrawalPartial(address[] calldata receivers, uint256[] calldata amounts)
+    /// @notice Prices and partially fulfills a specified number of pending shares.
+    /// @dev Any remaining shares stay queued with the original fee snapshot.
+    function fulfillWithdrawalPartial(address[] calldata receivers, uint256[] calldata sharesToFulfill)
         external
         onlyRole(ALLOCATOR_ROLE)
     {
-        require(receivers.length == amounts.length, ErrorsLib.InvalidRequest());
+        require(receivers.length == sharesToFulfill.length, ErrorsLib.InvalidRequest());
+        _requireFreshOffchainStrategies();
+        accrueInterest();
 
         uint256 len = receivers.length;
         IERC20 assetToken = IERC20(asset);
         uint256 balance = assetToken.balanceOf(address(this));
         uint256 reserved = reservedAssets;
         uint256 newReserved = reserved;
+        uint256 settlementTotalAssets = _totalAssets;
+        uint256 settlementTotalSupply = totalSupply;
 
         for (uint256 i; i < len;) {
             address receiver = receivers[i];
-            uint256 amt = amounts[i];
+            uint256 shares = sharesToFulfill[i];
 
             require(canReceiveAssets(receiver), ErrorsLib.CannotReceiveAssets());
             PendingWithdrawal memory p = pendingWithdrawal[receiver];
-            require(amt > 0 && amt <= p.assets, ErrorsLib.InvalidRequest());
+            require(shares > 0 && shares <= p.shares, ErrorsLib.InvalidRequest());
+            uint256 amt = _convertToAssetsSettled(shares, settlementTotalAssets, settlementTotalSupply);
             require(balance - newReserved >= amt, ErrorsLib.InsufficientLiquidity());
 
             newReserved += amt;
+            pendingClaimableAssets += amt;
+            _totalAssets -= amt.toUint128();
+            deleteShares(address(this), shares);
 
             // Merge the fee snapshot into the claimable balance.
             ClaimableWithdrawal storage claimable = _claimableWithdrawal[receiver];
             uint256 oldClaim = claimable.assets;
             claimable.fee = _blendFee(oldClaim, claimable.fee, amt, p.feeAtRequest);
-            claimable.assets = uint128(oldClaim + amt);
+            claimable.assets = (oldClaim + amt).toUint128();
 
-            // Reduce the remaining queued balance.
-            uint256 newAssets = uint256(p.assets) - amt;
-            if (newAssets == 0) {
+            // Reduce remaining escrowed shares. The assets field remains an estimate only.
+            uint256 newShares = uint256(p.shares) - shares;
+            if (newShares == 0) {
                 delete pendingWithdrawal[receiver];
             } else {
-                // Keep shares in proportion to the remaining assets.
-                uint256 newShares = (uint256(p.shares) * newAssets) / uint256(p.assets);
                 PendingWithdrawal storage ps = pendingWithdrawal[receiver];
-                ps.assets = newAssets.toUint128();
+                ps.assets = uint256(p.assets).mulDivDown(newShares, p.shares).toUint128();
                 ps.shares = newShares.toUint128();
             }
 
-            emit EventsLib.WithdrawalFulfilled(receiver, amt);
+            emit EventsLib.WithdrawalFulfilled(receiver, amt, shares);
             unchecked {
                 ++i;
             }
         }
 
         if (newReserved != reserved) reservedAssets = newReserved;
+    }
+
+    /// @dev Converts shares at the already-accrued fulfillment price, before those shares are burned.
+    function _convertToAssetsSettled(uint256 shares, uint256 settlementTotalAssets, uint256 settlementTotalSupply)
+        internal
+        view
+        returns (uint256)
+    {
+        return shares.mulDivDown(settlementTotalAssets + 1, settlementTotalSupply + virtualShares);
     }
 
     /// @notice Settles a fulfilled withdrawal for `receiver`.

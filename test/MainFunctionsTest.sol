@@ -124,7 +124,6 @@ contract MainFunctionsTest is BaseTest {
 
         assertEq(underlyingToken.balanceOf(address(vault)), totalAssetsAfterInterest - assets, "balanceOf(vault)");
         assertEq(underlyingToken.balanceOf(receiver), assets, "balanceOf(receiver)");
-
         assertEq(vault.balanceOf(address(this)), initialSharesDeposit - shares, "balanceOf(this)");
         assertEq(vault.totalSupply(), initialSharesDeposit - shares, "totalSupply");
     }
@@ -161,7 +160,6 @@ contract MainFunctionsTest is BaseTest {
 
         assertEq(underlyingToken.balanceOf(address(vault)), totalAssetsAfterInterest - assets, "balanceOf(vault)");
         assertEq(underlyingToken.balanceOf(receiver), assets, "balanceOf(receiver)");
-
         assertEq(vault.balanceOf(address(this)), initialSharesDeposit - shares, "balanceOf(this)");
         assertEq(vault.totalSupply(), initialSharesDeposit - shares, "totalSupply");
     }

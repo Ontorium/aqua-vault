@@ -5,8 +5,7 @@ pragma solidity ^0.8.28;
 import "./BaseTest.sol";
 
 /// @notice End-to-end coverage for the user-side lifecycle in §7.3 of the design:
-/// approve → deposit (mint shares) → allocate → accrue interest → redeem on the immediate path,
-/// then the same shape with a strategy fully drained so withdrawals queue up.
+/// approve → deposit → allocate → accrue interest → redeem/withdraw.
 contract UserFlowTest is BaseTest {
     address internal immutable alice = makeAddr("alice");
     address internal immutable bob = makeAddr("bob");
@@ -22,7 +21,7 @@ contract UserFlowTest is BaseTest {
         strategy = _addStrategyWithMaxCaps();
     }
 
-    /// @notice Walks every step in §7.3 with profit, then redeems on the immediate path.
+    /// @notice Walks the full lifecycle with strategy profit and an immediate redemption.
     /// @dev Isolated so each external call lands in its own tx and `firstTotalAssets` (transient) resets
     /// between deposit → allocate → setInterest → totalAssets reads.
     /// forge-config: default.isolate = true
@@ -55,8 +54,7 @@ contract UserFlowTest is BaseTest {
         uint256 expectedTotal = deposit + interest;
         assertApproxEqAbs(vault.totalAssets(), expectedTotal, 1, "interest reflected in totalAssets");
 
-        // Step 7-8: Alice redeems half her shares. Strategy gets touched via forceDeallocate-style flow first.
-        // To exit on the immediate path, return some liquidity to the Vault.
+        // Step 7-8: Alice redeems half her shares after enough liquidity is returned to the Vault.
         uint256 redeemShares = shares / 2;
         // Deallocate enough underlying to fund the immediate redeem.
         uint256 expectedAssets = vault.previewRedeem(redeemShares);
@@ -69,12 +67,11 @@ contract UserFlowTest is BaseTest {
         assertEq(outAssets, expectedAssets, "redeemed amount");
         assertEq(underlyingToken.balanceOf(alice), expectedAssets, "alice received assets");
         assertEq(vault.balanceOf(alice), shares - redeemShares, "alice's remaining shares");
-        // Withdrawal queue stayed empty — immediate path was used.
         (uint128 pending,,) = vault.pendingWithdrawal(alice);
         assertEq(uint256(pending), 0, "no queue entries");
     }
 
-    /// @notice §7.3 user pulls all idle and the rest gets queued.
+    /// @notice The portion covered by idle settles immediately; a later liquidity-short request queues.
     function testRedeemSplitImmediateAndQueued() public {
         uint256 deposit = 1_000e18;
         uint256 keepIdle = 200e18; // stays in vault for immediate path
@@ -90,25 +87,24 @@ contract UserFlowTest is BaseTest {
         vault.allocate(address(strategy), hex"", allocatedAmount);
         assertEq(underlyingToken.balanceOf(address(vault)), keepIdle, "idle = keepIdle");
 
-        // First withdraw fits in idle — immediate path.
+        // First withdrawal fits in idle and settles immediately.
         vm.prank(alice);
         uint256 sharesBurned1 = vault.withdraw(keepIdle, alice, alice);
         assertGt(sharesBurned1, 0);
         assertEq(underlyingToken.balanceOf(alice), keepIdle, "immediate transfer landed");
 
-        // Second withdraw exceeds idle (which is now 0) — queues.
+        // With idle exhausted, the second request enters the async queue.
         uint256 wantQueued = 100e18;
         vm.prank(alice);
-        uint256 sharesBurned2 = vault.withdraw(wantQueued, alice, alice);
-        assertGt(sharesBurned2, 0);
-        // alice's balance hasn't moved (still keepIdle from before).
+        uint256 sharesQueued = vault.withdraw(wantQueued, alice, alice);
+        assertGt(sharesQueued, 0);
         assertEq(underlyingToken.balanceOf(alice), keepIdle);
         (uint128 pendingAssets,,) = vault.pendingWithdrawal(alice);
-        assertEq(uint256(pendingAssets), wantQueued, "one queued request aggregated");
-        assertEq(vault.pendingClaimableAssets(), wantQueued, "queued amount tracked");
+        assertEq(uint256(pendingAssets), wantQueued, "only shortfall request queued");
+        assertEq(vault.pendingClaimableAssets(), 0, "not an asset liability before fulfillment");
 
-        // Shares burned in both paths.
-        assertEq(vault.balanceOf(alice), shares - sharesBurned1 - sharesBurned2);
+        assertEq(vault.balanceOf(alice), shares - sharesBurned1 - sharesQueued);
+        assertEq(vault.totalSupply(), shares - sharesBurned1, "only immediate shares burned");
     }
 
     /// @notice Two users deposit at different times, second user's share price reflects accrued interest.

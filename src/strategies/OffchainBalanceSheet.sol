@@ -22,9 +22,8 @@ abstract contract OffchainBalanceSheet {
         // Requested return amount that has not arrived onchain yet.
         uint128 pendingReceivable;
         uint64 lastReportTime;
+        uint64 lastReportBlock;
         uint64 stalePeriod;
-        // Minimum time between NAV reports.
-        uint64 minReportInterval;
         bytes32 reportHash;
     }
 
@@ -55,12 +54,12 @@ abstract contract OffchainBalanceSheet {
         return _position.lastReportTime;
     }
 
-    function stalePeriod() public view returns (uint256) {
-        return _position.stalePeriod;
+    function lastReportBlock() public view returns (uint256) {
+        return _position.lastReportBlock;
     }
 
-    function minReportInterval() public view returns (uint256) {
-        return _position.minReportInterval;
+    function stalePeriod() public view returns (uint256) {
+        return _position.stalePeriod;
     }
 
     function reportHash() public view returns (bytes32) {
@@ -79,11 +78,6 @@ abstract contract OffchainBalanceSheet {
     function _setStalePeriod(uint256 newStalePeriod) internal {
         _position.stalePeriod = _toUint64(newStalePeriod);
         emit EventsLib.StalePeriodSet(newStalePeriod);
-    }
-
-    function _setMinReportInterval(uint256 newMinReportInterval) internal {
-        _position.minReportInterval = _toUint64(newMinReportInterval);
-        emit EventsLib.SetMinReportInterval(newMinReportInterval);
     }
 
     function _recordAllocation(uint256 assets) internal {
@@ -160,15 +154,10 @@ abstract contract OffchainBalanceSheet {
         string calldata newReportURI,
         uint256 maxChangeBps
     ) internal {
-        require(newReportedAvailableLiquidity <= newReportedAssets, ErrorsLib.AvailableExceedsReportedAssets());
-
-        // Enforce the minimum report interval.
-        if (_position.lastReportTime != 0 && _position.minReportInterval != 0) {
-            require(
-                block.timestamp >= uint256(_position.lastReportTime) + uint256(_position.minReportInterval),
-                ErrorsLib.ReportTooSoon()
-            );
+        if (_position.lastReportTime != 0 && _position.lastReportBlock == block.number) {
+            revert ErrorsLib.ReportAlreadySubmittedThisBlock();
         }
+        require(newReportedAvailableLiquidity <= newReportedAssets, ErrorsLib.AvailableExceedsReportedAssets());
 
         uint256 oldOffchainValue = uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
         uint256 newOffchainValue = newReportedAssets + newPendingReceivable;
@@ -186,6 +175,7 @@ abstract contract OffchainBalanceSheet {
         _position.pendingReceivable = _toUint128(newPendingReceivable);
         _position.reportHash = newReportHash;
         _position.lastReportTime = uint64(block.timestamp);
+        _position.lastReportBlock = _toUint64(block.number);
         _reportURI = newReportURI;
 
         emit EventsLib.NAVReported(

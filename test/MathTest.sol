@@ -9,6 +9,10 @@ import {ErrorsLib} from "../src/libraries/ErrorsLib.sol";
 contract MathTest is Test {
     function setUp() public {}
 
+    function exposedToUint128(uint256 x) external pure returns (uint128) {
+        return MathLib.toUint128(x);
+    }
+
     function testMulDivDown(uint256 x, uint256 y, uint256 d) public pure {
         vm.assume(d != 0);
         // Proof that it's the tightest bound when y != 0:
@@ -31,5 +35,15 @@ contract MathTest is Test {
 
     function testMin(uint256 x, uint256 y) public pure {
         assertEq(MathLib.min(x, y), x < y ? x : y);
+    }
+
+    function testToUint128(uint128 x) public pure {
+        assertEq(MathLib.toUint128(uint256(x)), x);
+    }
+
+    function testToUint128Overflow(uint256 x) public {
+        x = bound(x, uint256(type(uint128).max) + 1, type(uint256).max);
+        vm.expectRevert(ErrorsLib.CastOverflow.selector);
+        this.exposedToUint128(x);
     }
 }

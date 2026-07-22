@@ -14,13 +14,9 @@ struct Caps {
     uint128 relativeCap;
 }
 
-/// @dev Single storage slot per `receiver` (`uint128 + uint128 = 256 bits` packed). Subsequent queued
-/// withdrawals accumulate into the same slot; a second `feeAtRequest` slot is added only when fees are
-/// active. Cleared via `delete` on claim/cancel for full refund.
-/// @dev `assets` is the gross amount owed (pre-withdrawal-fee); `feeAtRequest` snapshots the
-/// `withdrawalFee` (WAD-scaled) at the moment the request entered the queue so fee policy changes
-/// between request and claim do NOT affect the queued user. `shares` is the cumulative share count
-/// burned, restored on cancel.
+/// @dev Per-receiver asynchronous redemption request. `shares` are escrowed in the vault and remain
+/// exposed to NAV changes until fulfillment. `assets` is only the request-time gross estimate and is
+/// never used for settlement. `feeAtRequest` snapshots the withdrawal fee, weighted by queued shares.
 struct PendingWithdrawal {
     uint128 assets;
     uint128 shares;
@@ -63,6 +59,7 @@ interface IVault is IERC4626, IERC2612 {
         returns (uint128 assets, uint128 shares, uint64 feeAtRequest);
     function claimableAssets(address receiver) external view returns (uint128);
     function claimableFee(address receiver) external view returns (uint64);
+    function previewPendingWithdrawal(address receiver) external view returns (uint256 assets);
     function reservedAssets() external view returns (uint256);
     function pendingClaimableAssets() external view returns (uint256);
     function paused() external view returns (bool);
@@ -106,9 +103,10 @@ interface IVault is IERC4626, IERC2612 {
     /// @notice Batched allocate/deallocate to move capital between strategies in one call. Allocate legs
     /// respect the pause; deallocate (exit) legs remain available while paused.
     function rebalance(RebalanceAction[] calldata actions) external;
-    /// @notice Operator (ALLOCATOR_ROLE) moves each receiver's full pending request into their reserved
-    /// `claimableAssets`, locking liquidity per receiver. Caller controls fulfillment order via the list.
+    /// @notice Settles each receiver's escrowed shares at the current fresh NAV and reserves the resulting assets.
     function fulfillWithdrawal(address[] calldata receivers) external;
+    /// @notice Partially settles pending requests. `shares` is denominated in vault shares, not assets.
+    function fulfillWithdrawalPartial(address[] calldata receivers, uint256[] calldata shares) external;
 
     // Exchange rate
     function accrueInterest() external;
@@ -118,7 +116,7 @@ interface IVault is IERC4626, IERC2612 {
         view
         returns (uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares);
 
-    // Withdrawal queue (per-receiver, operator-fulfilled, ERC-7540 / Centrifuge style)
+    // Withdrawal queue (per-receiver, operator-fulfilled, asynchronous pricing)
     /// @notice Settles `receiver`'s fulfilled (reserved) withdrawal. Permissionless; assets always flow to
     /// `receiver` (not to msg.sender). Only claimable after the operator calls {fulfillWithdrawal}.
     function claim(address receiver) external returns (uint256 assets);

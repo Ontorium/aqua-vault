@@ -58,7 +58,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         address _roleManager,
         address _custodian,
         uint256 _stalePeriod,
-        uint256 _minReportInterval,
         uint256 _maxChangeBps
     ) AccessManaged(_roleManager, _vault) {
         require(_asset != address(0), ErrorsLib.ZeroAddress());
@@ -68,7 +67,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         custodian = _custodian;
         maxChangeBps = _maxChangeBps;
         _setStalePeriod(_stalePeriod);
-        _setMinReportInterval(_minReportInterval);
     }
 
     /* ADMIN — gated by GOVERNANCE_ROLE */
@@ -86,10 +84,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
 
     function setStalePeriod(uint256 newStalePeriod) external onlyRole(GOVERNANCE_ROLE) {
         _setStalePeriod(newStalePeriod);
-    }
-
-    function setMinReportInterval(uint256 newMinReportInterval) external onlyRole(GOVERNANCE_ROLE) {
-        _setMinReportInterval(newMinReportInterval);
     }
 
     function setSkimRecipient(address newSkimRecipient) external onlyRole(GOVERNANCE_ROLE) {

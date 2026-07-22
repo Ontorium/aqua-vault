@@ -19,8 +19,8 @@ library EventsLib {
     event Withdraw(
         address indexed sender, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares
     );
-    /// @dev Per-receiver accumulating queue. No `requestId`: requests for the same receiver merge.
-    /// `onBehalf` identifies the account whose shares were burned for this submission.
+    /// @dev Per-receiver accumulating queue. Shares are escrowed, not burned, until fulfillment.
+    /// `assets` is the request-time estimate only; settlement uses the fulfillment-time NAV.
     event WithdrawalRequested(
         address indexed sender,
         address indexed onBehalf,
@@ -28,8 +28,8 @@ library EventsLib {
         uint256 assets,
         uint256 shares
     );
-    /// @dev Operator (ALLOCATOR_ROLE) moved a receiver's pending request into the reserved/claimable pool.
-    event WithdrawalFulfilled(address indexed receiver, uint256 assets);
+    /// @dev Operator priced and burned escrowed shares, then reserved the resulting claimable assets.
+    event WithdrawalFulfilled(address indexed receiver, uint256 assets, uint256 shares);
     event WithdrawalClaimed(address indexed receiver, uint256 assets);
 
     // Vault creation events
@@ -88,7 +88,6 @@ library EventsLib {
     event SetDepositFee(uint256 newDepositFee);
     event SetWithdrawalFee(uint256 newWithdrawalFee);
     event SetProtocolFeeRecipient(address indexed newProtocolFeeRecipient);
-    event SetMinReportInterval(uint256 newMinReportInterval);
     event DecreaseAbsoluteCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newAbsoluteCap);
     event IncreaseAbsoluteCap(bytes32 indexed id, bytes idData, uint256 newAbsoluteCap);
     event DecreaseRelativeCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newRelativeCap);
