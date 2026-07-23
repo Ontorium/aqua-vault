@@ -109,12 +109,10 @@ library EventsLib {
     event StrategyAllocated(uint256 assets);
     event StrategyDeallocated(uint256 assets);
     event CapitalDeployed(uint256 assets, address indexed destination);
-    event ReturnRequested(uint256 assets);
     event CapitalReturned(uint256 assets);
     event NAVReported(
         uint256 reportedAssets,
         uint256 reportedAvailableLiquidity,
-        uint256 pendingReceivable,
         bytes32 indexed reportHash,
         string reportURI,
         uint64 timestamp

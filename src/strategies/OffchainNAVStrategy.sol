@@ -25,17 +25,10 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     /// @dev Recipient for non-underlying token sweeps.
     address public skimRecipient;
 
-    /// @dev If true, return flows are tracked onchain via `requestReturn` and `recordReturn`.
-    bool public strictMode;
-
     error CannotSkimUnderlying();
     error SkimRecipientUnset();
-    error StrictModeRequired();
-    error PendingReceivableNonZero();
-
     event Skim(address indexed token, uint256 amount);
     event SetSkimRecipient(address indexed recipient);
-    event SetStrictMode(bool strict);
 
     modifier onlyVault() {
         require(msg.sender == vault, ErrorsLib.Unauthorized());
@@ -91,14 +84,6 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         emit SetSkimRecipient(newSkimRecipient);
     }
 
-    /// @notice Sets the return-flow accounting mode.
-    /// @dev Strict mode cannot be disabled while `pendingReceivable` is non-zero.
-    function setStrictMode(bool _strict) external onlyRole(GOVERNANCE_ROLE) {
-        if (!_strict && _position.pendingReceivable != 0) revert PendingReceivableNonZero();
-        strictMode = _strict;
-        emit SetStrictMode(_strict);
-    }
-
     /* SKIM */
 
     /// @notice Sweeps a non-underlying token balance to `skimRecipient`.
@@ -123,7 +108,7 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         uint256 idle = IERC20(asset).balanceOf(address(this));
         if (_position.lastReportTime == 0) return idle;
 
-        return idle + uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
+        return idle + uint256(_position.reportedAssets);
     }
 
     /// @notice Returns available liquidity for withdrawals.
@@ -190,18 +175,15 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         _recordCapitalDeployed(assets, destination);
     }
 
-    /// @notice Marks assets as in transit from the custodian.
-    /// @dev Available only in strict mode.
-    function requestReturn(uint256 assets) external onlyManager {
-        if (!strictMode) revert StrictModeRequired();
-        _recordReturnRequested(assets);
-    }
-
-    /// @notice Records assets returned by the custodian.
-    /// @dev Available only in strict mode.
-    function recordReturn(uint256 assets) external onlyManager {
-        if (!strictMode) revert StrictModeRequired();
-        require(IERC20(asset).balanceOf(address(this)) >= assets, ErrorsLib.ReturnNotReceived());
+    /// @notice Atomically returns underlying from the custodian and reconciles the offchain book.
+    /// @dev The custodian must approve this strategy before calling. Transfer and accounting either
+    /// both succeed or both revert, so returned assets are never double-counted as idle and reported NAV.
+    function returnCapital(uint256 assets) external {
+        require(msg.sender == custodian, ErrorsLib.Unauthorized());
+        require(assets > 0, ErrorsLib.InvalidRequest());
+        require(assets <= _position.reportedAssets, ErrorsLib.RequestExceedsReportedAssets());
+        require(assets <= _position.reportedAvailableLiquidity, ErrorsLib.RequestExceedsAvailableLiquidity());
+        SafeERC20Lib.safeTransferFrom(asset, msg.sender, address(this), assets);
         _recordCapitalReturned(assets);
     }
 
@@ -210,18 +192,15 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     /// @notice Reports offchain NAV and liquidity.
     /// @param newReportedAssets Offchain NAV excluding onchain idle assets.
     /// @param newReportedAvailableLiquidity Offchain liquidity excluding onchain idle assets.
-    /// @param newPendingReceivable Return amount requested but not yet received.
     function report(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,
-        uint256 newPendingReceivable,
         bytes32 newReportHash,
         string calldata newReportURI
     ) external override onlyReporter {
         _recordNAVReport(
             newReportedAssets,
             newReportedAvailableLiquidity,
-            newPendingReceivable,
             newReportHash,
             newReportURI,
             maxChangeBps

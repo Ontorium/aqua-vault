@@ -73,7 +73,7 @@ contract StaleNAVExitAttackTest is BaseTest {
         vm.prank(manager);
         strategy.deployToCustodian(deployed);
         vm.prank(reporter);
-        strategy.report(deployed, 0, 0, keccak256("confirm"), "ipfs://confirm");
+        strategy.report(deployed, 0, keccak256("confirm"), "ipfs://confirm");
 
         assertEq(vault.totalAssets(), 2 * deposit, "idle + reported NAV");
         assertEq(underlyingToken.balanceOf(address(vault)), deposit - 1, "idle is below full exit value");
@@ -113,7 +113,7 @@ contract StaleNAVExitAttackTest is BaseTest {
         // 6. The reporter marks the loss. Fulfillment now prices both LPs against the same fresh NAV.
         vm.roll(block.number + 1);
         vm.prank(reporter);
-        strategy.report(0, 0, 0, keccak256("truth"), "ipfs://truth");
+        strategy.report(0, 0, keccak256("truth"), "ipfs://truth");
         vm.prank(allocator);
         vault.fulfillWithdrawal(receivers);
         uint256 attackerGot = vault.claim(attacker);

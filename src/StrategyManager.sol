@@ -367,9 +367,7 @@ contract StrategyManager is IStrategyManager, AccessManaged {
         IOffchainStrategyStatus offchain = IOffchainStrategyStatus(strategy);
         if (!offchain.isStale()) return false;
 
-        return offchain.deployedPrincipal() != 0
-            || offchain.reportedAssets() != 0
-            || offchain.pendingReceivable() != 0;
+        return offchain.deployedPrincipal() != 0 || offchain.reportedAssets() != 0;
     }
 
 }

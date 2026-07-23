@@ -19,8 +19,6 @@ abstract contract OffchainBalanceSheet {
         uint128 reportedAssets;
         // Reported offchain liquidity, excluding onchain idle assets.
         uint128 reportedAvailableLiquidity;
-        // Requested return amount that has not arrived onchain yet.
-        uint128 pendingReceivable;
         uint64 lastReportTime;
         uint64 lastReportBlock;
         uint64 stalePeriod;
@@ -44,10 +42,6 @@ abstract contract OffchainBalanceSheet {
 
     function reportedAvailableLiquidity() public view returns (uint256) {
         return _position.reportedAvailableLiquidity;
-    }
-
-    function pendingReceivable() public view returns (uint256) {
-        return _position.pendingReceivable;
     }
 
     function lastReportTime() public view returns (uint256) {
@@ -101,49 +95,19 @@ abstract contract OffchainBalanceSheet {
         emit EventsLib.CapitalDeployed(assets, destination);
     }
 
-    /// @dev Moves value from reported assets to pending receivable.
-    function _recordReturnRequested(uint256 assets) internal {
-        require(assets <= _position.reportedAssets, ErrorsLib.RequestExceedsReportedAssets());
-        require(assets <= _position.reportedAvailableLiquidity, ErrorsLib.RequestExceedsAvailableLiquidity());
-
-        _position.reportedAssets = uint128(uint256(_position.reportedAssets) - assets);
-        _position.reportedAvailableLiquidity = uint128(uint256(_position.reportedAvailableLiquidity) - assets);
-        _position.pendingReceivable = _toUint128(uint256(_position.pendingReceivable) + assets);
-
-        emit EventsLib.ReturnRequested(assets);
-    }
-
-    /// @dev Records assets received back onchain.
-    /// Clears pending receivable first, then reduces reported assets if needed.
+    /// @dev Atomically moves value from the offchain book into onchain idle accounting.
+    /// The caller transfers the underlying before invoking this hook in the same transaction.
     function _recordCapitalReturned(uint256 assets) internal {
-        uint256 remaining = assets;
+        uint256 reported = _position.reportedAssets;
+        uint256 available = _position.reportedAvailableLiquidity;
+        require(assets <= reported, ErrorsLib.RequestExceedsReportedAssets());
+        require(assets <= available, ErrorsLib.RequestExceedsAvailableLiquidity());
 
-        uint256 receivable = _position.pendingReceivable;
-        if (remaining >= receivable) {
-            _position.pendingReceivable = 0;
-            remaining -= receivable;
-        } else {
-            _position.pendingReceivable = uint128(receivable - remaining);
-            remaining = 0;
-        }
-
-        if (remaining != 0) {
-            uint256 reported = _position.reportedAssets;
-            if (remaining >= reported) {
-                _position.reportedAssets = 0;
-                remaining -= reported;
-            } else {
-                _position.reportedAssets = uint128(reported - remaining);
-                remaining = 0;
-            }
-        }
+        _position.reportedAssets = _toUint128(reported - assets);
+        _position.reportedAvailableLiquidity = _toUint128(available - assets);
 
         uint256 deployed = _position.deployedPrincipal;
-        if (assets >= deployed) {
-            _position.deployedPrincipal = 0;
-        } else {
-            _position.deployedPrincipal = uint128(deployed - assets);
-        }
+        _position.deployedPrincipal = assets >= deployed ? 0 : _toUint128(deployed - assets);
 
         emit EventsLib.CapitalReturned(assets);
     }
@@ -151,7 +115,6 @@ abstract contract OffchainBalanceSheet {
     function _recordNAVReport(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,
-        uint256 newPendingReceivable,
         bytes32 newReportHash,
         string calldata newReportURI,
         uint256 maxChangeBps
@@ -161,8 +124,8 @@ abstract contract OffchainBalanceSheet {
         }
         require(newReportedAvailableLiquidity <= newReportedAssets, ErrorsLib.AvailableExceedsReportedAssets());
 
-        uint256 oldOffchainValue = uint256(_position.reportedAssets) + uint256(_position.pendingReceivable);
-        uint256 newOffchainValue = newReportedAssets + newPendingReceivable;
+        uint256 oldOffchainValue = _position.reportedAssets;
+        uint256 newOffchainValue = newReportedAssets;
 
         if (_position.lastReportTime != 0 && maxChangeBps != 0 && oldOffchainValue != 0) {
             uint256 delta = newOffchainValue > oldOffchainValue
@@ -174,7 +137,6 @@ abstract contract OffchainBalanceSheet {
 
         _position.reportedAssets = _toUint128(newReportedAssets);
         _position.reportedAvailableLiquidity = _toUint128(newReportedAvailableLiquidity);
-        _position.pendingReceivable = _toUint128(newPendingReceivable);
         _position.reportHash = newReportHash;
         _position.lastReportTime = uint64(block.timestamp);
         _position.lastReportBlock = _toUint64(block.number);
@@ -183,7 +145,6 @@ abstract contract OffchainBalanceSheet {
         emit EventsLib.NAVReported(
             newReportedAssets,
             newReportedAvailableLiquidity,
-            newPendingReceivable,
             newReportHash,
             newReportURI,
             uint64(block.timestamp)

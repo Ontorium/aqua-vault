@@ -7,6 +7,5 @@ pragma solidity >=0.5.0;
 interface IOffchainStrategyStatus {
     function deployedPrincipal() external view returns (uint256);
     function reportedAssets() external view returns (uint256);
-    function pendingReceivable() external view returns (uint256);
     function isStale() external view returns (bool);
 }
