@@ -87,8 +87,10 @@ abstract contract OffchainBalanceSheet {
 
     function _recordDeallocation(uint256 assets) internal {
         uint256 current = _position.allocatedPrincipal;
-        require(assets <= current, ErrorsLib.DeallocationExceedsAllocation());
-        _position.allocatedPrincipal = uint128(current - assets);
+        // Realized profit may make the onchain balance larger than the principal originally
+        // allocated by the vault. The strategy's actual token balance limits deallocation;
+        // principal accounting therefore floors at zero when principal plus profit is returned.
+        _position.allocatedPrincipal = assets >= current ? 0 : _toUint128(current - assets);
         emit EventsLib.StrategyDeallocated(assets);
     }
 

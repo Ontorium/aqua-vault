@@ -256,6 +256,55 @@ contract OffchainBalanceSheetTest is BaseTest {
         assertEq(strategy.deployedPrincipal(), 0);
     }
 
+    /// @notice Realized offchain profit can be returned and fully deallocated after strict-mode
+    /// reconciliation. Principal accounting floors at zero instead of trapping the excess profit.
+    function testReturnedProfitCanBeFullyDeallocated() public {
+        uint256 principal = 1_000e18;
+        uint256 profit = 100e18;
+        uint256 returnedAssets = principal + profit;
+
+        vm.prank(governance);
+        strategy.setStrictMode(true);
+
+        underlyingToken.mint(address(vault), principal);
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", principal);
+        vm.prank(manager);
+        strategy.deployToCustodian(principal);
+
+        // The reporter marks the profitable position and confirms that all of it can be returned.
+        vm.prank(reporter);
+        strategy.report(returnedAssets, returnedAssets, 0, keccak256("profitable-nav"), "");
+
+        // Move the full mark into receivables before the custodian sends the tokens onchain.
+        vm.prank(manager);
+        strategy.requestReturn(returnedAssets);
+        assertEq(strategy.reportedAssets(), 0, "offchain NAV moved out of reported assets");
+        assertEq(strategy.pendingReceivable(), returnedAssets, "full return tracked in transit");
+
+        underlyingToken.mint(custodian, profit);
+        vm.prank(custodian);
+        underlyingToken.transfer(address(strategy), returnedAssets);
+        vm.prank(manager);
+        strategy.recordReturn(returnedAssets);
+
+        assertEq(strategy.pendingReceivable(), 0, "receivable cleared after arrival");
+        assertEq(strategy.deployedPrincipal(), 0, "deployed principal cleared");
+        assertEq(strategy.totalAssets(), returnedAssets, "onchain idle includes principal and profit once");
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", returnedAssets);
+
+        assertEq(strategy.allocatedPrincipal(), 0, "principal accounting floors at zero");
+        assertEq(strategy.totalAssets(), 0, "strategy fully emptied");
+        assertEq(underlyingToken.balanceOf(address(vault)), returnedAssets, "vault receives principal and profit");
+        assertEq(strategyManager.allocation(strategy.strategyId()), 0, "cap accounting floors at zero");
+
+        vm.prank(governance);
+        strategyManager.removeStrategy(address(strategy));
+        assertFalse(strategyManager.isStrategy(address(strategy)), "empty strategy is removable");
+    }
+
     /* ── Return-flow MODE (Simple vs Strict) ──────────────────────────────────── */
 
     /// @notice Default Simple mode disables requestReturn/recordReturn — they revert. The custodian
