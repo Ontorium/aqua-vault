@@ -109,15 +109,11 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.deployToCustodian(1);
     }
 
-    /// @notice End-to-end: an offchain NAV gain reported by the custodian raises the vault share price.
+    /// @notice End-to-end: a trusted offchain NAV gain bypasses maxRate and raises the share price immediately.
     /// Capital is allocated, deployed to the custodian and confirmed at cost; a later report of a higher NAV
-    /// flows reportedAssets → strategy totalAssets → vault totalAssets → per-share value (capped by maxRate).
+    /// flows reportedAssets → strategy totalAssets → vault totalAssets in the same transaction.
     /// forge-config: default.isolate = true
     function testOffchainNAVGainRaisesSharePrice() public {
-        // Let the share price track real NAV growth.
-        vm.prank(governance);
-        vault.setMaxRate(MAX_MAX_RATE);
-
         uint256 deposit = 1_000e18;
         address user = makeAddr("user");
         underlyingToken.mint(user, deposit);
@@ -143,13 +139,103 @@ contract OffchainBalanceSheetTest is BaseTest {
         vm.roll(block.number + 1);
         vm.prank(reporter);
         strategy.report(deposit + 100e18, 0, keccak256("gain"), "ipfs://gain");
-        vault.accrueInterest();
 
-        // Share price rose with the reported NAV.
+        // maxRate remains zero, but the authenticated offchain report is reflected immediately.
+        assertEq(vault.maxRate(), 0);
         uint256 assetsPerShareAfter = vault.convertToAssets(shares);
         assertGt(assetsPerShareAfter, assetsPerShareBefore, "share price increased");
         assertApproxEqAbs(assetsPerShareAfter, deposit + 100e18, 2, "NAV gain reflected in share value");
         assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault totalAssets grew by NAV gain");
+    }
+
+    /// @notice A depositor entering after a lumpy gain pays the post-report price and cannot capture it.
+    function testOffchainNAVGainIsNotDilutedByLaterDeposit() public {
+        uint256 initialDeposit = 1_000e18;
+        address existingHolder = makeAddr("existingHolder");
+        underlyingToken.mint(existingHolder, initialDeposit);
+        vm.startPrank(existingHolder);
+        underlyingToken.approve(address(vault), initialDeposit);
+        uint256 existingShares = vault.deposit(initialDeposit, existingHolder);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", initialDeposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(initialDeposit);
+        vm.prank(reporter);
+        strategy.report(initialDeposit, 0, keccak256("cost"), "ipfs://cost");
+
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(1_200e18, 0, keccak256("gain"), "ipfs://gain");
+        assertApproxEqAbs(vault.convertToAssets(existingShares), 1_200e18, 2, "gain belongs to existing holder");
+
+        address laterDepositor = makeAddr("laterDepositor");
+        underlyingToken.mint(laterDepositor, initialDeposit);
+        vm.startPrank(laterDepositor);
+        underlyingToken.approve(address(vault), initialDeposit);
+        uint256 laterShares = vault.deposit(initialDeposit, laterDepositor);
+        vm.stopPrank();
+
+        assertLt(laterShares, initialDeposit, "later depositor enters at post-report price");
+        assertApproxEqAbs(laterShares, 833_333333333333333333, 2, "shares priced at 1.2 assets");
+        assertApproxEqAbs(
+            vault.convertToAssets(existingShares), 1_200e18, 3, "later deposit does not dilute prior gain"
+        );
+    }
+
+    /// @notice Only the report delta bypasses maxRate; an unrelated direct donation remains smoothed.
+    function testOffchainReportDoesNotBypassMaxRateForDonation() public {
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(deposit);
+        vm.prank(reporter);
+        strategy.report(deposit, 0, keccak256("cost"), "ipfs://cost");
+
+        underlyingToken.mint(address(vault), 500e18);
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(1_100e18, 0, keccak256("gain"), "ipfs://gain");
+
+        assertEq(vault.maxRate(), 0);
+        assertEq(vault.totalAssets(), 1_100e18, "only trusted report gain bypasses maxRate");
+    }
+
+    function testOffchainNAVLossIsReflectedImmediately() public {
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(deposit);
+        vm.prank(reporter);
+        strategy.report(deposit, 0, keccak256("cost"), "ipfs://cost");
+
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(700e18, 0, keccak256("loss"), "ipfs://loss");
+
+        assertEq(vault.totalAssets(), 700e18);
+    }
+
+    function testSyncOffchainNAVRejectsNonStrategyCaller() public {
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vault.syncOffchainNAV(0);
     }
 
     function testReportUpdatesNAVAndStaleness(uint256 navBefore, uint256 navAfter) public {

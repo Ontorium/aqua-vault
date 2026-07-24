@@ -3,6 +3,7 @@
 pragma solidity ^0.8.24;
 
 import {IERC20} from "../interfaces/IERC20.sol";
+import {IVault} from "../interfaces/IVault.sol";
 import {IOffchainNAVStrategy} from "../interfaces/IOffchainNAVStrategy.sol";
 import {OffchainBalanceSheet} from "./OffchainBalanceSheet.sol";
 import {AccessManaged} from "../AccessManaged.sol";
@@ -101,13 +102,11 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
     /* VAULT STRATEGY INTERFACE */
 
     /// @notice Returns the assets counted by the vault.
-    /// @dev Before the first report only onchain idle counts. Once at least one report exists, the last
-    /// reported NAV remains in `totalAssets()` even when it becomes stale; deposits/mints are blocked at
-    /// the vault level while stale so an expired mark cannot be used for new entry pricing.
+    /// @dev Capital sent to the custodian is booked at cost until the first authoritative report. After
+    /// that, the last reported NAV remains in `totalAssets()` even when stale; deposits/mints are blocked
+    /// at the vault level while stale so an expired mark cannot be used for new entry pricing.
     function totalAssets() external view override returns (uint256) {
         uint256 idle = IERC20(asset).balanceOf(address(this));
-        if (_position.lastReportTime == 0) return idle;
-
         return idle + uint256(_position.reportedAssets);
     }
 
@@ -198,13 +197,15 @@ contract OffchainNAVStrategy is IOffchainNAVStrategy, OffchainBalanceSheet, Acce
         bytes32 newReportHash,
         string calldata newReportURI
     ) external override onlyReporter {
-        _recordNAVReport(
-            newReportedAssets,
-            newReportedAvailableLiquidity,
-            newReportHash,
-            newReportURI,
-            maxChangeBps
-        );
+        // Settle all pre-report accounting under the old mark first. The post-report callback then
+        // applies only this strategy's authenticated NAV delta without letting unrelated donations or
+        // onchain gains bypass the vault's maxRate.
+        IVault(vault).accrueInterest();
+        uint256 previousStrategyAssets = IERC20(asset).balanceOf(address(this)) + uint256(_position.reportedAssets);
+
+        _recordNAVReport(newReportedAssets, newReportedAvailableLiquidity, newReportHash, newReportURI, maxChangeBps);
+
+        IVault(vault).syncOffchainNAV(previousStrategyAssets);
     }
 
     function _approveVault(uint256 assets) internal {

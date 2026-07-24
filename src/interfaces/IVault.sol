@@ -110,6 +110,9 @@ interface IVault is IERC4626, IERC2612 {
 
     // Exchange rate
     function accrueInterest() external;
+    /// @notice Atomically applies a trusted NAV delta reported by a registered offchain strategy.
+    /// @dev The strategy must call this immediately after updating its report in the same transaction.
+    function syncOffchainNAV(uint256 previousStrategyAssets) external;
     function forceSyncReportedNAV() external;
     function accrueInterestView()
         external

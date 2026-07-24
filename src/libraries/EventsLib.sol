@@ -95,6 +95,13 @@ library EventsLib {
     event SetMaxRate(uint256 newMaxRate);
     event SetForceDeallocatePenalty(address indexed strategy, uint256 forceDeallocatePenalty);
     event ForceSyncReportedNAV(address indexed caller, uint256 previousTotalAssets, uint256 newTotalAssets);
+    event SyncOffchainNAV(
+        address indexed strategy,
+        uint256 previousStrategyAssets,
+        uint256 currentStrategyAssets,
+        uint256 previousTotalAssets,
+        uint256 newTotalAssets
+    );
 
     // StrategyManager-related events
     event SetStrategyManager(address indexed newStrategyManager);
