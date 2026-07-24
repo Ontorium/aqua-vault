@@ -115,9 +115,7 @@ contract ScenarioReport is EnvSigner, StdCheats {
         uint256 offIdle;
         uint256 offReportedAssets;
         uint256 offReportedAvailableLiquidity;
-        uint256 offPendingReceivable;
         uint256 custodianBal;
-        bool offStrictMode;
         bool offIsStale;
     }
 
@@ -739,7 +737,7 @@ contract ScenarioReport is EnvSigner, StdCheats {
         Snap memory b = _snap();
         offchain.deployToCustodian(amt);
         // Confirmation NAV report — flips isStale false so totalAssets includes the offchain part.
-        offchain.report(amt, amt, 0, keccak256(abi.encode("deploy-confirm", caseNo)), "ipfs://deploy-confirm");
+        offchain.report(amt, amt, keccak256(abi.encode("deploy-confirm", caseNo)), "ipfs://deploy-confirm");
         _emitOffchain(
             "deploy_to_custodian",
             unicode"OFFCHAIN_MANAGER가 strategy의 onchain idle을 custodian으로 송금하고 "
@@ -762,7 +760,9 @@ contract ScenarioReport is EnvSigner, StdCheats {
         // 1% gain
         uint256 newReported = currentReported + (currentReported / 100);
         Snap memory b = _snap();
-        offchain.report(newReported, 0, 0, keccak256(abi.encode("scenario", caseNo)), "ipfs://scenario-report");
+        offchain.report(
+            newReported, newReported, keccak256(abi.encode("scenario", caseNo)), "ipfs://scenario-report"
+        );
         _emitOffchain(
             "nav_report_gain",
             unicode"OFFCHAIN_REPORTER가 NAV 1% 상승을 보고. reportedAssets 증가 → strategy.totalAssets 증가 "
@@ -770,16 +770,15 @@ contract ScenarioReport is EnvSigner, StdCheats {
             unicode"fork 모드는 firstTotalAssets transient 한계로 sharePrice 컬럼이 안 움직임 — 헤더 주석 참조). "
             unicode"단위테스트 `testOffchainNAVGainRaisesSharePrice`가 sharePrice 상승을 단언한다.",
             string.concat(
-                "offchain.report(", vm.toString(newReported), ", 0, 0, hash, uri)"
+                "offchain.report(", vm.toString(newReported), ", ", vm.toString(newReported), ", hash, uri)"
             ),
             b,
             _snap()
         );
     }
 
-    /// @dev Custodian (account 2) physically sends half of its holdings back to the strategy.
-    /// Then the deployer (= reporter) posts an updated NAV reflecting the return.
-    /// Works in both fork and live mode because we switch the broadcaster per action.
+    /// @dev Custodian atomically returns half of the reported liquid position. `returnCapital`
+    /// pulls the tokens and reduces the offchain book in the same transaction.
     function _case_returnFromCustodian() internal {
         if (address(offchain) == address(0)) return;
         uint256 reported = offchain.reportedAssets();
@@ -792,20 +791,18 @@ contract ScenarioReport is EnvSigner, StdCheats {
 
         Snap memory b = _snap();
 
-        // 1) Custodian broadcasts the USDT return.
+        // Custodian approves the exact amount, then atomically transfers and reconciles it.
         _asCustodian();
-        asset.transfer(address(offchain), amt);
-
-        // 2) Operator (= reporter) posts the new NAV.
-        _asOperator();
-        uint256 newReported = reported - amt;
-        offchain.report(newReported, 0, 0, keccak256(abi.encode("return", caseNo)), "ipfs://return");
+        asset.approve(address(offchain), amt);
+        offchain.returnCapital(amt);
 
         _emitOffchain(
             "return_from_custodian",
-            unicode"Custodian이 자산 절반을 strategy로 반환 + reporter가 새 NAV 보고. "
-            unicode"reportedAssets 감소, strategy onchain idle 증가, totalAssets은 보존(yield 무시).",
-            string.concat("custodian.transfer(strategy, ", vm.toString(amt), ") + report(newAssets)"),
+            unicode"Custodian이 `returnCapital`로 자산 절반을 원자적으로 반환. 실제 transfer와 "
+            unicode"reportedAssets 감소가 같은 트랜잭션에서 실행되어 totalAssets은 보존되고 이중계상 구간이 없다.",
+            string.concat(
+                "custodian.approve(strategy, ", vm.toString(amt), ") + offchain.returnCapital(", vm.toString(amt), ")"
+            ),
             b,
             _snap()
         );
@@ -892,8 +889,6 @@ contract ScenarioReport is EnvSigner, StdCheats {
             s.offIdle = asset.balanceOf(address(offchain));
             s.offReportedAssets = offchain.reportedAssets();
             s.offReportedAvailableLiquidity = offchain.reportedAvailableLiquidity();
-            s.offPendingReceivable = offchain.pendingReceivable();
-            s.offStrictMode = offchain.strictMode();
             s.offIsStale = offchain.isStale();
         }
         s.custodianBal = custodian != address(0) ? asset.balanceOf(custodian) : 0;
@@ -985,8 +980,6 @@ contract ScenarioReport is EnvSigner, StdCheats {
         t = string.concat(t, _row(unicode"strategy onchain idle", b.offIdle, a.offIdle));
         t = string.concat(t, _row(unicode"reportedAssets (offchain NAV)", b.offReportedAssets, a.offReportedAssets));
         t = string.concat(t, _row(unicode"reportedAvailableLiquidity", b.offReportedAvailableLiquidity, a.offReportedAvailableLiquidity));
-        t = string.concat(t, _row(unicode"pendingReceivable", b.offPendingReceivable, a.offPendingReceivable));
-        t = string.concat(t, unicode"| strictMode | ", b.offStrictMode ? "true" : "false", " | ", a.offStrictMode ? "true" : "false", " | - |\n");
         t = string.concat(t, unicode"| isStale | ", b.offIsStale ? "true" : "false", " | ", a.offIsStale ? "true" : "false", " | - |\n");
 
         t = string.concat(t, unicode"\n#### Custodian 상태\n\n");
