@@ -16,8 +16,10 @@ interface IOffchainNAVStrategy is IStrategy {
     function report(
         uint256 newReportedAssets,
         uint256 newReportedAvailableLiquidity,
-        uint256 newPendingReceivable,
         bytes32 newReportHash,
         string calldata newReportURI
     ) external;
+
+    /// @notice Atomically pulls returned capital from the custodian and reconciles the offchain book.
+    function returnCapital(uint256 assets) external;
 }

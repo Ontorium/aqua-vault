@@ -374,11 +374,40 @@ contract Vault is IVault, AccessManaged {
         _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, managementFeeShares);
     }
 
+    /// @notice Applies only the trusted NAV delta produced by a registered offchain strategy report.
+    /// @dev The reporting strategy calls `accrueInterest()` before changing its NAV, then invokes this
+    /// callback after the report. This preserves maxRate smoothing for donations and onchain gains while
+    /// reflecting the authenticated offchain delta immediately.
+    function syncOffchainNAV(uint256 previousStrategyAssets) external {
+        address _strategyManager = strategyManager;
+        require(
+            _strategyManager != address(0) && IStrategyManager(_strategyManager).isOffchainStrategy(msg.sender),
+            ErrorsLib.Unauthorized()
+        );
+
+        uint256 currentStrategyAssets = IStrategy(msg.sender).totalAssets();
+        uint256 previousTotalAssets = _totalAssets;
+        uint256 newTotalAssets;
+
+        if (currentStrategyAssets >= previousStrategyAssets) {
+            newTotalAssets = previousTotalAssets + (currentStrategyAssets - previousStrategyAssets);
+        } else {
+            newTotalAssets = previousTotalAssets.zeroFloorSub(previousStrategyAssets - currentStrategyAssets);
+        }
+
+        // Management fees were already brought current by the report's pre-update accrueInterest call.
+        (uint256 performanceFeeShares,) = _previewFeeShares(previousTotalAssets, newTotalAssets, 0);
+        _applyAccruedTotalAssets(newTotalAssets, performanceFeeShares, 0);
+
+        emit EventsLib.SyncOffchainNAV(
+            msg.sender, previousStrategyAssets, currentStrategyAssets, previousTotalAssets, newTotalAssets
+        );
+    }
+
     /// @notice Deliberate, governance-only immediate NAV reflection that bypasses the maxRate cap.
-    /// @dev NOT a routine path. Routine NAV flows through `OffchainNAVStrategy.report()` and is
-    /// smoothed by maxRate via `accrueInterest`. This forces `_totalAssets` to the full real value in
-    /// one shot, removing the anti-jump guard — use only for trusted/authoritative marks or to correct
-    /// a stuck price. Gated by GOVERNANCE_ROLE (timelocked in production); emits a distinct event.
+    /// @dev NOT a routine path. Registered offchain reports apply only their authenticated delta through
+    /// `syncOffchainNAV`; this function instead forces `_totalAssets` to the full aggregate real value,
+    /// including otherwise-smoothed donations and onchain gains. Use only to correct a stuck price.
     function forceSyncReportedNAV() external onlyRole(GOVERNANCE_ROLE) {
         uint256 newTotalAssets = _realAssets();
         uint256 previousTotalAssets = _totalAssets;

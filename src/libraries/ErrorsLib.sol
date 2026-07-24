@@ -48,7 +48,6 @@ library ErrorsLib {
     error RequestExceedsReportedAssets();
     error RequestNotPending();
     error ReportAlreadySubmittedThisBlock();
-    error ReturnNotReceived();
     error StaleOffchainStrategy();
     error TimelockNotDecreasing();
     error TimelockNotExpired();

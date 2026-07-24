@@ -109,15 +109,11 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.deployToCustodian(1);
     }
 
-    /// @notice End-to-end: an offchain NAV gain reported by the custodian raises the vault share price.
+    /// @notice End-to-end: a trusted offchain NAV gain bypasses maxRate and raises the share price immediately.
     /// Capital is allocated, deployed to the custodian and confirmed at cost; a later report of a higher NAV
-    /// flows reportedAssets → strategy totalAssets → vault totalAssets → per-share value (capped by maxRate).
+    /// flows reportedAssets → strategy totalAssets → vault totalAssets in the same transaction.
     /// forge-config: default.isolate = true
     function testOffchainNAVGainRaisesSharePrice() public {
-        // Let the share price track real NAV growth.
-        vm.prank(governance);
-        vault.setMaxRate(MAX_MAX_RATE);
-
         uint256 deposit = 1_000e18;
         address user = makeAddr("user");
         underlyingToken.mint(user, deposit);
@@ -132,7 +128,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         vm.prank(manager);
         strategy.deployToCustodian(deposit);
         vm.prank(reporter);
-        strategy.report(deposit, 0, 0, keccak256("confirm"), "ipfs://confirm");
+        strategy.report(deposit, 0, keccak256("confirm"), "ipfs://confirm");
 
         // Baseline: one share ~ 1 underlying.
         uint256 assetsPerShareBefore = vault.convertToAssets(shares);
@@ -142,14 +138,104 @@ contract OffchainBalanceSheetTest is BaseTest {
         skip(365 days);
         vm.roll(block.number + 1);
         vm.prank(reporter);
-        strategy.report(deposit + 100e18, 0, 0, keccak256("gain"), "ipfs://gain");
-        vault.accrueInterest();
+        strategy.report(deposit + 100e18, 0, keccak256("gain"), "ipfs://gain");
 
-        // Share price rose with the reported NAV.
+        // maxRate remains zero, but the authenticated offchain report is reflected immediately.
+        assertEq(vault.maxRate(), 0);
         uint256 assetsPerShareAfter = vault.convertToAssets(shares);
         assertGt(assetsPerShareAfter, assetsPerShareBefore, "share price increased");
         assertApproxEqAbs(assetsPerShareAfter, deposit + 100e18, 2, "NAV gain reflected in share value");
         assertApproxEqAbs(vault.totalAssets(), deposit + 100e18, 1, "vault totalAssets grew by NAV gain");
+    }
+
+    /// @notice A depositor entering after a lumpy gain pays the post-report price and cannot capture it.
+    function testOffchainNAVGainIsNotDilutedByLaterDeposit() public {
+        uint256 initialDeposit = 1_000e18;
+        address existingHolder = makeAddr("existingHolder");
+        underlyingToken.mint(existingHolder, initialDeposit);
+        vm.startPrank(existingHolder);
+        underlyingToken.approve(address(vault), initialDeposit);
+        uint256 existingShares = vault.deposit(initialDeposit, existingHolder);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", initialDeposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(initialDeposit);
+        vm.prank(reporter);
+        strategy.report(initialDeposit, 0, keccak256("cost"), "ipfs://cost");
+
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(1_200e18, 0, keccak256("gain"), "ipfs://gain");
+        assertApproxEqAbs(vault.convertToAssets(existingShares), 1_200e18, 2, "gain belongs to existing holder");
+
+        address laterDepositor = makeAddr("laterDepositor");
+        underlyingToken.mint(laterDepositor, initialDeposit);
+        vm.startPrank(laterDepositor);
+        underlyingToken.approve(address(vault), initialDeposit);
+        uint256 laterShares = vault.deposit(initialDeposit, laterDepositor);
+        vm.stopPrank();
+
+        assertLt(laterShares, initialDeposit, "later depositor enters at post-report price");
+        assertApproxEqAbs(laterShares, 833_333333333333333333, 2, "shares priced at 1.2 assets");
+        assertApproxEqAbs(
+            vault.convertToAssets(existingShares), 1_200e18, 3, "later deposit does not dilute prior gain"
+        );
+    }
+
+    /// @notice Only the report delta bypasses maxRate; an unrelated direct donation remains smoothed.
+    function testOffchainReportDoesNotBypassMaxRateForDonation() public {
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(deposit);
+        vm.prank(reporter);
+        strategy.report(deposit, 0, keccak256("cost"), "ipfs://cost");
+
+        underlyingToken.mint(address(vault), 500e18);
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(1_100e18, 0, keccak256("gain"), "ipfs://gain");
+
+        assertEq(vault.maxRate(), 0);
+        assertEq(vault.totalAssets(), 1_100e18, "only trusted report gain bypasses maxRate");
+    }
+
+    function testOffchainNAVLossIsReflectedImmediately() public {
+        uint256 deposit = 1_000e18;
+        address user = makeAddr("user");
+        underlyingToken.mint(user, deposit);
+        vm.startPrank(user);
+        underlyingToken.approve(address(vault), deposit);
+        vault.deposit(deposit, user);
+        vm.stopPrank();
+
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", deposit);
+        vm.prank(manager);
+        strategy.deployToCustodian(deposit);
+        vm.prank(reporter);
+        strategy.report(deposit, 0, keccak256("cost"), "ipfs://cost");
+
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(700e18, 0, keccak256("loss"), "ipfs://loss");
+
+        assertEq(vault.totalAssets(), 700e18);
+    }
+
+    function testSyncOffchainNAVRejectsNonStrategyCaller() public {
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
+        vault.syncOffchainNAV(0);
     }
 
     function testReportUpdatesNAVAndStaleness(uint256 navBefore, uint256 navAfter) public {
@@ -158,7 +244,7 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         bytes32 hash1 = keccak256("r1");
         vm.prank(reporter);
-        strategy.report(navBefore, 0, 0, hash1, "ipfs://1");
+        strategy.report(navBefore, 0, hash1, "ipfs://1");
 
         assertFalse(strategy.isStale(), "fresh after report");
         assertEq(strategy.reportedAssets(), navBefore);
@@ -173,58 +259,70 @@ contract OffchainBalanceSheetTest is BaseTest {
         bytes32 hash2 = keccak256("r2");
         vm.roll(block.number + 1);
         vm.prank(reporter);
-        strategy.report(navAfter, 0, 0, hash2, "ipfs://2");
+        strategy.report(navAfter, 0, hash2, "ipfs://2");
         assertFalse(strategy.isStale());
         assertEq(strategy.reportedAssets(), navAfter);
     }
 
     function testReportRejectsSecondSubmissionInSameBlock() public {
         vm.prank(reporter);
-        strategy.report(1e18, 0, 0, keccak256("r0"), "");
+        strategy.report(1e18, 0, keccak256("r0"), "");
 
         vm.expectRevert(ErrorsLib.ReportAlreadySubmittedThisBlock.selector);
         vm.prank(reporter);
-        strategy.report(1e18, 0, 0, keccak256("r1"), "");
+        strategy.report(1e18, 0, keccak256("r1"), "");
 
         assertEq(strategy.reportHash(), keccak256("r0"), "first report remains active");
 
         vm.roll(block.number + 1);
         vm.prank(reporter);
-        strategy.report(1e18, 0, 0, keccak256("r1"), "");
+        strategy.report(1e18, 0, keccak256("r1"), "");
         assertEq(strategy.reportHash(), keccak256("r1"), "next-block report accepted");
     }
 
     function testReportRejectsLiquidityAboveAssets() public {
         vm.expectRevert(ErrorsLib.AvailableExceedsReportedAssets.selector);
         vm.prank(reporter);
-        strategy.report(100, 101, 0, keccak256("r"), "");
+        strategy.report(100, 101, keccak256("r"), "");
     }
 
-    function testReportEnforcesMaxChangeBps() public {
+    function testReportEnforcesMaxChangeBpsOnGain() public {
         // Tighten maxChange to 1000 bps (10%).
         vm.prank(governance);
         strategy.setMaxChangeBps(1_000);
 
         vm.prank(reporter);
-        strategy.report(1_000e18, 0, 0, keccak256("r0"), "");
+        strategy.report(1_000e18, 0, keccak256("r0"), "");
 
         // Trying to jump 50% must revert.
         vm.roll(block.number + 1);
         vm.expectRevert(ErrorsLib.MaxChangeExceeded.selector);
         vm.prank(reporter);
-        strategy.report(1_500e18, 0, 0, keccak256("r1"), "");
+        strategy.report(1_500e18, 0, keccak256("r1"), "");
 
         // Within bounds (5%) works.
         vm.prank(reporter);
-        strategy.report(1_050e18, 0, 0, keccak256("r2"), "");
+        strategy.report(1_050e18, 0, keccak256("r2"), "");
     }
 
-    function testRequestReturnAndRecord(uint256 amount) public {
-        amount = bound(amount, 1, type(uint96).max);
-
-        // Strict mode required for requestReturn/recordReturn.
+    function testReportAllowsLossBeyondMaxChangeBps() public {
         vm.prank(governance);
-        strategy.setStrictMode(true);
+        strategy.setMaxChangeBps(1_000); // 10% gain cap.
+
+        vm.prank(reporter);
+        strategy.report(1_000e18, 0, keccak256("r0"), "");
+
+        // A 50% loss exceeds the configured bps but must still be reported and reflected immediately.
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(500e18, 0, keccak256("loss"), "");
+
+        assertEq(strategy.reportedAssets(), 500e18);
+        assertEq(vault.totalAssets(), 500e18);
+    }
+
+    function testReturnCapitalAtomicallyReconciles(uint256 amount) public {
+        amount = bound(amount, 1, type(uint96).max);
 
         underlyingToken.mint(address(vault), amount);
         vm.prank(allocator);
@@ -234,65 +332,67 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         // Reporter then reports current state with full liquidity available.
         vm.prank(reporter);
-        strategy.report(amount, amount, 0, keccak256("r0"), "");
+        strategy.report(amount, amount, keccak256("r0"), "");
 
-        vm.expectEmit();
-        emit EventsLib.ReturnRequested(amount);
-        vm.prank(manager);
-        strategy.requestReturn(amount);
-        assertEq(strategy.pendingReceivable(), amount);
-        assertEq(strategy.reportedAssets(), 0);
-        assertEq(strategy.reportedAvailableLiquidity(), 0);
-
-        // Custodian sends funds back, manager records them.
+        uint256 totalBefore = strategy.totalAssets();
         vm.prank(custodian);
-        underlyingToken.transfer(address(strategy), amount);
+        underlyingToken.approve(address(strategy), amount);
 
         vm.expectEmit();
         emit EventsLib.CapitalReturned(amount);
-        vm.prank(manager);
-        strategy.recordReturn(amount);
-        assertEq(strategy.pendingReceivable(), 0);
+        vm.prank(custodian);
+        strategy.returnCapital(amount);
+
+        assertEq(strategy.totalAssets(), totalBefore, "atomic return preserves NAV");
+        assertEq(underlyingToken.balanceOf(address(strategy)), amount, "underlying arrived onchain");
+        assertEq(strategy.reportedAssets(), 0, "returned value removed from offchain NAV");
+        assertEq(strategy.reportedAvailableLiquidity(), 0, "returned liquidity removed from offchain book");
         assertEq(strategy.deployedPrincipal(), 0);
     }
 
-    /* ── Return-flow MODE (Simple vs Strict) ──────────────────────────────────── */
+    /// @notice Realized offchain profit can be atomically returned and fully deallocated.
+    /// Principal accounting floors at zero instead of trapping the excess profit.
+    function testReturnedProfitCanBeFullyDeallocated() public {
+        uint256 principal = 1_000e18;
+        uint256 profit = 100e18;
+        uint256 returnedAssets = principal + profit;
 
-    /// @notice Default Simple mode disables requestReturn/recordReturn — they revert. The custodian
-    /// send + REPORTER report is the entire reconciliation flow.
-    function testSimpleModeDisablesRequestReturn() public {
-        assertFalse(strategy.strictMode(), "default is Simple");
-
+        underlyingToken.mint(address(vault), principal);
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", principal);
         vm.prank(manager);
-        vm.expectRevert(OffchainNAVStrategy.StrictModeRequired.selector);
-        strategy.requestReturn(100);
+        strategy.deployToCustodian(principal);
 
-        vm.prank(manager);
-        vm.expectRevert(OffchainNAVStrategy.StrictModeRequired.selector);
-        strategy.recordReturn(100);
-    }
+        // The reporter marks the profitable position and confirms that all of it can be returned.
+        vm.prank(reporter);
+        strategy.report(returnedAssets, returnedAssets, keccak256("profitable-nav"), "");
 
-    /// @notice GOV can toggle strict mode and Simple→Strict→Simple round-trip works when no in-transit
-    /// balance is outstanding.
-    function testSetStrictModeToggle() public {
-        assertFalse(strategy.strictMode());
+        underlyingToken.mint(custodian, profit);
+        vm.startPrank(custodian);
+        underlyingToken.approve(address(strategy), returnedAssets);
+        strategy.returnCapital(returnedAssets);
+        vm.stopPrank();
+
+        assertEq(strategy.reportedAssets(), 0, "offchain NAV cleared atomically");
+        assertEq(strategy.reportedAvailableLiquidity(), 0, "offchain liquidity cleared atomically");
+        assertEq(strategy.deployedPrincipal(), 0, "deployed principal cleared");
+        assertEq(strategy.totalAssets(), returnedAssets, "onchain idle includes principal and profit once");
+
+        vm.prank(allocator);
+        vault.deallocate(address(strategy), hex"", returnedAssets);
+
+        assertEq(strategy.allocatedPrincipal(), 0, "principal accounting floors at zero");
+        assertEq(strategy.totalAssets(), 0, "strategy fully emptied");
+        assertEq(underlyingToken.balanceOf(address(vault)), returnedAssets, "vault receives principal and profit");
+        assertEq(strategyManager.allocation(strategy.strategyId()), 0, "cap accounting floors at zero");
 
         vm.prank(governance);
-        strategy.setStrictMode(true);
-        assertTrue(strategy.strictMode());
-
-        vm.prank(governance);
-        strategy.setStrictMode(false);
-        assertFalse(strategy.strictMode());
+        strategyManager.removeStrategy(address(strategy));
+        assertFalse(strategyManager.isStrategy(address(strategy)), "empty strategy is removable");
     }
 
-    /// @notice Strict→Simple is rejected while a return is still in-transit (`pendingReceivable > 0`).
-    /// Operator must complete `recordReturn` first to settle the in-transit balance.
-    function testStrictToSimpleBlockedWhilePendingReceivable() public {
+    function testReturnCapitalOnlyCustodian() public {
         uint256 amount = 100e18;
-
-        vm.prank(governance);
-        strategy.setStrictMode(true);
 
         underlyingToken.mint(address(vault), amount);
         vm.prank(allocator);
@@ -301,42 +401,47 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.deployToCustodian(amount);
 
         vm.prank(reporter);
-        strategy.report(amount, amount, 0, keccak256("r0"), "");
+        strategy.report(amount, amount, keccak256("r0"), "");
 
-        // Create in-transit balance.
+        vm.expectRevert(ErrorsLib.Unauthorized.selector);
         vm.prank(manager);
-        strategy.requestReturn(amount);
-        assertEq(strategy.pendingReceivable(), amount);
-
-        // Cannot switch back to Simple while in-transit balance is outstanding.
-        vm.prank(governance);
-        vm.expectRevert(OffchainNAVStrategy.PendingReceivableNonZero.selector);
-        strategy.setStrictMode(false);
-
-        // After recordReturn settles it, the switch goes through.
-        vm.prank(custodian);
-        underlyingToken.transfer(address(strategy), amount);
-        vm.prank(manager);
-        strategy.recordReturn(amount);
-        assertEq(strategy.pendingReceivable(), 0);
-
-        vm.prank(governance);
-        strategy.setStrictMode(false);
-        assertFalse(strategy.strictMode());
+        strategy.returnCapital(amount);
     }
 
-    function testSetStrictModeOnlyGovernance(address rdm) public {
-        vm.assume(rdm != governance && rdm != address(timelock));
-        vm.expectRevert(ErrorsLib.Unauthorized.selector);
-        vm.prank(rdm);
-        strategy.setStrictMode(true);
+    function testReturnCapitalRejectsMoreThanReportedLiquidity() public {
+        uint256 amount = 100e18;
+
+        underlyingToken.mint(address(vault), amount);
+        vm.prank(allocator);
+        vault.allocate(address(strategy), hex"", amount);
+        vm.prank(manager);
+        strategy.deployToCustodian(amount);
+        vm.prank(reporter);
+        strategy.report(amount, 40e18, keccak256("partially-liquid"), "");
+
+        vm.prank(custodian);
+        underlyingToken.approve(address(strategy), amount);
+
+        vm.expectRevert(ErrorsLib.RequestExceedsAvailableLiquidity.selector);
+        vm.prank(custodian);
+        strategy.returnCapital(50e18);
+
+        assertEq(underlyingToken.balanceOf(custodian), amount, "failed return moves no tokens");
+        assertEq(underlyingToken.balanceOf(address(strategy)), 0, "strategy receives nothing on revert");
+        assertEq(strategy.reportedAssets(), amount, "reported NAV unchanged on revert");
+    }
+
+    function testReturnCapitalRejectsZero() public {
+        vm.expectRevert(ErrorsLib.InvalidRequest.selector);
+        vm.prank(custodian);
+        strategy.returnCapital(0);
     }
 
     function testReporterRoleIsRequired(address rdm) public {
         vm.assume(rdm != reporter);
         vm.expectRevert(ErrorsLib.Unauthorized.selector);
         vm.prank(rdm);
-        strategy.report(0, 0, 0, bytes32(0), "");
+        strategy.report(0, 0, bytes32(0), "");
     }
 
     function testManagerRoleIsRequired(address rdm) public {
@@ -354,7 +459,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         underlyingToken.mint(address(strategy), amount);
 
         vm.prank(reporter);
-        strategy.report(nav, liquidity, 0, keccak256("r"), "");
+        strategy.report(nav, liquidity, keccak256("r"), "");
         assertEq(strategy.totalAssets(), amount + nav);
         assertEq(strategy.availableLiquidity(), amount + liquidity);
 
@@ -385,7 +490,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         vm.prank(manager);
         strategy.deployToCustodian(deposit);
         vm.prank(reporter);
-        strategy.report(deposit, deposit, 0, keccak256("confirm"), "ipfs://confirm");
+        strategy.report(deposit, deposit, keccak256("confirm"), "ipfs://confirm");
 
         skip(1 days + 1);
         assertTrue(strategy.isStale(), "strategy stale");
@@ -423,7 +528,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         vm.prank(manager);
         strategy.deployToCustodian(deployed);
         vm.prank(reporter);
-        strategy.report(deployed, 0, 0, keccak256("initial"), "ipfs://initial");
+        strategy.report(deployed, 0, keccak256("initial"), "ipfs://initial");
         assertFalse(strategyManager.hasBlockingStaleOffchainExposure(), "fresh exposure does not block");
 
         skip(1 days + 1);
@@ -457,7 +562,7 @@ contract OffchainBalanceSheetTest is BaseTest {
 
         vm.roll(block.number + 1);
         vm.prank(reporter);
-        strategy.report(deployed, 0, 0, keccak256("fresh"), "ipfs://fresh");
+        strategy.report(deployed, 0, keccak256("fresh"), "ipfs://fresh");
         assertFalse(strategyManager.hasBlockingStaleOffchainExposure(), "fresh report clears block");
         vm.prank(allocator);
         vault.fulfillWithdrawal(receivers);
@@ -484,7 +589,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         vm.prank(manager);
         strategy.deployToCustodian(deployed);
         vm.prank(reporter);
-        strategy.report(deployed, 0, 0, keccak256("fresh-immediate"), "ipfs://fresh-immediate");
+        strategy.report(deployed, 0, keccak256("fresh-immediate"), "ipfs://fresh-immediate");
 
         vm.prank(user);
         vault.withdraw(requested, user, user);
