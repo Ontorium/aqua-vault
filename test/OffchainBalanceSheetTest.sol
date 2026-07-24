@@ -286,7 +286,7 @@ contract OffchainBalanceSheetTest is BaseTest {
         strategy.report(100, 101, keccak256("r"), "");
     }
 
-    function testReportEnforcesMaxChangeBps() public {
+    function testReportEnforcesMaxChangeBpsOnGain() public {
         // Tighten maxChange to 1000 bps (10%).
         vm.prank(governance);
         strategy.setMaxChangeBps(1_000);
@@ -303,6 +303,22 @@ contract OffchainBalanceSheetTest is BaseTest {
         // Within bounds (5%) works.
         vm.prank(reporter);
         strategy.report(1_050e18, 0, keccak256("r2"), "");
+    }
+
+    function testReportAllowsLossBeyondMaxChangeBps() public {
+        vm.prank(governance);
+        strategy.setMaxChangeBps(1_000); // 10% gain cap.
+
+        vm.prank(reporter);
+        strategy.report(1_000e18, 0, keccak256("r0"), "");
+
+        // A 50% loss exceeds the configured bps but must still be reported and reflected immediately.
+        vm.roll(block.number + 1);
+        vm.prank(reporter);
+        strategy.report(500e18, 0, keccak256("loss"), "");
+
+        assertEq(strategy.reportedAssets(), 500e18);
+        assertEq(vault.totalAssets(), 500e18);
     }
 
     function testReturnCapitalAtomicallyReconciles(uint256 amount) public {

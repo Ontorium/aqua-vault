@@ -127,12 +127,14 @@ abstract contract OffchainBalanceSheet {
         uint256 oldOffchainValue = _position.reportedAssets;
         uint256 newOffchainValue = newReportedAssets;
 
-        if (_position.lastReportTime != 0 && maxChangeBps != 0 && oldOffchainValue != 0) {
-            uint256 delta = newOffchainValue > oldOffchainValue
-                ? newOffchainValue - oldOffchainValue
-                : oldOffchainValue - newOffchainValue;
-
-            require(delta * BPS <= oldOffchainValue * maxChangeBps, ErrorsLib.MaxChangeExceeded());
+        // Cap only upward marks. Losses must remain reportable in full so an outdated, inflated NAV
+        // cannot persist merely because the realized loss exceeds the configured circuit breaker.
+        if (
+            _position.lastReportTime != 0 && maxChangeBps != 0 && oldOffchainValue != 0
+                && newOffchainValue > oldOffchainValue
+        ) {
+            uint256 gain = newOffchainValue - oldOffchainValue;
+            require(gain * BPS <= oldOffchainValue * maxChangeBps, ErrorsLib.MaxChangeExceeded());
         }
 
         _position.reportedAssets = _toUint128(newReportedAssets);
