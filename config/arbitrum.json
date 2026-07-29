@@ -1,0 +1,60 @@
+{
+  "_comment": "Per-network deploy config — Arbitrum One (42161). Only INTENTIONAL overrides are listed; omit a key to use DeployConfig.DEFAULT_* (fees/penalty/targetBps -> 0, caps -> absolute=uint128.max & relative=1e18, gates -> 0x0, maxRate -> ~100% APR, stalePeriod -> 1d, maxChangeBps -> 10%, timelock -> 60/60/0). Replace role/recipient/custodian addresses with your multisig before production.",
+
+  "roles": {
+    "curator": "0x1111111111111111111111111111111111111111",
+    "sentinel": "0x2222222222222222222222222222222222222222",
+    "allocator": "0x3333333333333333333333333333333333333333",
+    "offchainManager": "0x4444444444444444444444444444444444444444",
+    "offchainReporter": "0x5555555555555555555555555555555555555555"
+  },
+
+  "fees": {
+    "depositFee": "1000000000000000",
+    "withdrawalFee": "1000000000000000",
+    "performanceFee": "100000000000000000",
+    "forceDeallocatePenalty": "5000000000000000",
+    "protocolFeeRecipient": "0x6666666666666666666666666666666666666666",
+    "performanceFeeRecipient": "0x6666666666666666666666666666666666666666",
+    "managementFeeRecipient": "0x6666666666666666666666666666666666666666"
+  },
+
+  "timelock": { "highRisk": "1209600", "mediumRisk": "604800", "lowRisk": "259200" },
+
+  "offchain": {
+    "stalePeriod": "604800",
+    "maxChangeBps": "500",
+    "custodian": "0x7777777777777777777777777777777777777777"
+  },
+
+  "caps": {
+    "morphoStrategy": { "relative": "400000000000000000" },
+    "morphoCollateral": { "relative": "600000000000000000" },
+    "morphoMarket": { "relative": "300000000000000000" }
+  },
+
+  "strategy": {
+    "aquaTargetBps": "3000",
+    "morphoTargetBps": "4000",
+    "offchainTargetBps": "3000",
+    "skimRecipient": "0x8888888888888888888888888888888888888888"
+  },
+
+  "morpho": {
+    "_comment": "Real Arbitrum Morpho Blue + an active USDC market (PT-USDai-15OCT collateral). Verify/replace the market before use.",
+    "morphoBlue": "0x6c247b1F6182318877311737BaC0844bAa518F5e",
+    "loanToken": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "collateralToken": "0xC9d24aD0bB25F34098e226a8C5192Dea7bacccaE",
+    "oracle": "0xaAe5194036306A14B6bFE51A255001bd75F315b1",
+    "irm": "0x66F30587FB8D4206918deb78ecA7d5eBbafD06DA",
+    "lltv": "915000000000000000"
+  },
+
+  "external": {
+    "asset": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "aavePool": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+    "aToken": "0x724dc807b04555b71ed48a6896b6F41593b8C637",
+    "morpho": "0x6c247b1F6182318877311737BaC0844bAa518F5e",
+    "custodian": "0x7777777777777777777777777777777777777777"
+  }
+}

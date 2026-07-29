@@ -21,4 +21,4 @@ docs/
 
 .vscode
 
-*.json
+run-*.json

@@ -16,23 +16,44 @@ import {MorphoMock} from "../../test/mocks/MorphoMock.sol";
 import {IrmMock} from "../../test/mocks/IrmMock.sol";
 import {ERC20Mock} from "../../test/mocks/ERC20Mock.sol";
 
-/// @notice Step 13 — deploy a MOCK Morpho Blue (+IRM +collateral) and a MorphoStrategy for an
-/// existing vault, then wire the strategy into the vault's StrategyManager. Mirrors step 9
-/// (AquaStrategy) but for an onchain Morpho-supply strategy. Registers kind=1 (ONCHAIN) so it lands
-/// in the "DeFi" allocation bucket alongside Aqua.
+/// @notice Step 13 — deploy a MorphoStrategy for an existing vault and wire it into the vault's
+/// StrategyManager. Mirrors step 9 (AquaStrategy) but for an onchain Morpho-supply strategy.
+/// Registers kind=1 (ONCHAIN) so it lands in the "DeFi" allocation bucket alongside Aqua.
 ///
 /// The signer self-grants the vault-scoped GOVERNANCE_ROLE (admined by DEFAULT_ADMIN_ROLE),
-/// whitelists the mock IRM, adds the strategy, and lifts caps for ALL THREE ids the strategy emits
-/// (strategy / collateral / market) so a later `vault.allocate` is not blocked by a zero cap.
+/// adds the strategy, and always lifts the strategy-level cap.
 ///
 /// Repeat once per vault: each vault needs its OWN MorphoStrategy instance (vault/asset are
-/// immutable at construction). Re-running deploys a fresh mock Morpho — pass the SAME mock across
-/// vaults only if you edit this script to take it as an arg.
+/// immutable at construction).
 ///
-/// A canonical demo market is fixed here:
+/// If `morpho` is unresolved (arg=0 and config has no Morpho), the script falls back to TESTNET
+/// demo mode and deploys:
+///   - MorphoMock
+///   - IrmMock
+///   - mock collateral
+/// then whitelists the IRM and lifts collateral/market caps for this canonical demo market:
 ///   MarketParams{ loanToken: vault.asset(), collateralToken: <mock>, oracle: 0, irm: <mock>, lltv: 0.86e18 }
 /// The abi-encoded params are logged so an ALLOCATOR can later run:
 ///   vault.allocate(strategy, <encodedMarketParams>, assets)
+///
+/// If `morpho` is provided (explicit arg or config.external.morpho), the default 4-arg entrypoint
+/// assumes a REAL market already exists and does NOT deploy mocks or set market/collateral caps. In
+/// that mode you must separately:
+///   1. approve the real IRM via `strategy.setIrmApproved(realIrm, true)`
+///   2. lift caps for the real collateral id
+///   3. lift caps for the real market id
+///
+/// For TESTING with an existing mock Morpho, use either:
+///   - the 5-arg entrypoint with `setupMockMarket = true`, which deploys a fresh IrmMock and
+///     mock collateral automatically, or
+///   - the 6-arg entrypoint and pass explicit `collateral` and `irm`.
+///
+/// Both paths wire the canonical demo market params onto the newly deployed strategy and do the
+/// pre-allocation setup only:
+///   1. approve IRM on the strategy
+///   2. lift the collateral id cap
+///   3. lift the market id cap
+/// Allocate remains a separate explicit step.
 ///
 /// Args:
 ///   vault           Vault contract (its `asset()` is read to wire the strategy)
@@ -52,25 +73,51 @@ contract DeployMorphoStrategy is EnvSigner, DeployConfig {
     using MarketParamsLib for MarketParams;
 
     function run(address vaultAddr, address smAddr, address rmAddr, address morpho) external {
+        _run(vaultAddr, smAddr, rmAddr, morpho, address(0), address(0), false);
+    }
+
+    function run(address vaultAddr, address smAddr, address rmAddr, address morpho, bool setupMockMarket) external {
+        _run(vaultAddr, smAddr, rmAddr, morpho, address(0), address(0), setupMockMarket);
+    }
+
+    function run(
+        address vaultAddr,
+        address smAddr,
+        address rmAddr,
+        address morpho,
+        address collateral,
+        address irm
+    ) external {
+        _run(vaultAddr, smAddr, rmAddr, morpho, collateral, irm, false);
+    }
+
+    function _run(
+        address vaultAddr,
+        address smAddr,
+        address rmAddr,
+        address morpho,
+        address collateral,
+        address irm,
+        bool deployMockMarketComponents
+    ) internal {
         Vault vault = Vault(vaultAddr);
         address asset = vault.asset();
         RoleManager rm = RoleManager(rmAddr);
         StrategyManager sm = StrategyManager(smAddr);
 
-        // Resolve Morpho: arg -> config.external.morpho -> (still 0) deploy a mock demo below.
-        if (morpho == address(0) && _configAvailable()) morpho = _loadConfig().morpho;
-        bool useMock = morpho == address(0);
+        // Per-network config: morpho address + strategy knobs (caps / targetBps / penalty / skim) and,
+        // for a real market, the market params (collateral/oracle/irm/lltv).
+        bool hasCfg = _configAvailable();
+        Config memory c;
+        if (hasCfg) c = _loadConfig();
+        // Resolve Morpho: explicit arg -> config.external.morpho -> (still 0) deploy a fresh MorphoMock.
+        if (morpho == address(0)) morpho = c.morpho;
 
         address signer = _startBroadcastFromEnv();
 
-        // 1. When no real Morpho is given, deploy the mock protocol + a zero-rate IRM + mock collateral.
-        IrmMock irm;
-        ERC20Mock collateral;
-        if (useMock) {
-            morpho = address(new MorphoMock());
-            irm = new IrmMock();
-            collateral = new ERC20Mock(8); // WBTC-like; collateral is not validated by the mock.
-        }
+        // 1. If no Morpho was resolved, deploy a fresh mock protocol.
+        bool deployedMockMorpho = morpho == address(0);
+        if (deployedMockMorpho) morpho = address(new MorphoMock());
 
         // 2. Deploy the strategy bound to (vault, asset, morpho).
         MorphoStrategy strategy = new MorphoStrategy(vaultAddr, asset, morpho, rmAddr);
@@ -81,30 +128,45 @@ contract DeployMorphoStrategy is EnvSigner, DeployConfig {
         bytes32 govRole = rm.getScopedRole(vaultAddr, "GOVERNANCE_ROLE");
         rm.grantRole(govRole, signer);
 
-        // 4. Register the strategy (kind=1: ONCHAIN -> "DeFi" bucket) and lift its strategy-level cap.
-        sm.addStrategy(address(strategy), 1, 0);
+        // 4. Register the strategy (kind=1: ONCHAIN -> "DeFi" bucket) with configured target/caps.
+        sm.addStrategy(address(strategy), 1, hasCfg ? c.morphoTargetBps : 0);
         bytes memory strategyIdData = abi.encode("MorphoStrategy", address(strategy));
-        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
-        sm.increaseRelativeCap(strategyIdData, WAD);
+        sm.increaseAbsoluteCap(strategyIdData, hasCfg ? c.morphoStrategyAbsCap : type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, hasCfg ? c.morphoStrategyRelCap : WAD);
+        if (hasCfg && c.forceDeallocatePenalty > 0) {
+            sm.setForceDeallocatePenalty(address(strategy), c.forceDeallocatePenalty);
+        }
+        if (hasCfg && c.skimRecipient != address(0)) strategy.setSkimRecipient(c.skimRecipient);
 
-        // 5. Mock path only: whitelist the mock IRM and lift the demo market's collateral/market caps.
-        //    For a real Morpho, an operator approves the real IRM and sets real market caps separately.
-        MarketParams memory mp;
-        if (useMock) {
-            strategy.setIrmApproved(address(irm), true);
-            mp = MarketParams({
-                loanToken: asset,
-                collateralToken: address(collateral),
-                oracle: address(0),
-                irm: address(irm),
-                lltv: 0.86e18
-            });
-            bytes memory collateralIdData = abi.encode("collateralToken", address(collateral));
-            bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
-            sm.increaseAbsoluteCap(collateralIdData, type(uint128).max);
-            sm.increaseRelativeCap(collateralIdData, WAD);
-            sm.increaseAbsoluteCap(marketIdData, type(uint128).max);
-            sm.increaseRelativeCap(marketIdData, WAD);
+        address irmAddr = irm;
+        address collateralAddr = collateral;
+        bytes32 marketId;
+        bytes memory encodedMarketParams;
+        bool configuredMarket; // any market was wired
+        bool mockMarket; // true = mock/demo IRM+collateral; false = real (config) market
+
+        // 5. Wire a market so the strategy can be allocated into.
+        if (deployedMockMorpho || deployMockMarketComponents) {
+            // Demo mode: deploy mock IRM + collateral (testnet).
+            irmAddr = _deployMockIrm();
+            collateralAddr = _deployMockCollateral();
+            configuredMarket = true;
+            mockMarket = true;
+            (marketId, encodedMarketParams) = _configureTestMarket(vault, sm, strategy, collateralAddr, irmAddr);
+        } else if (collateral != address(0) || irm != address(0)) {
+            // Explicit mock IRM/collateral passed as args (testing an existing mock Morpho).
+            require(collateral != address(0), "collateral required");
+            require(irm != address(0), "irm required");
+            configuredMarket = true;
+            mockMarket = true;
+            (marketId, encodedMarketParams) = _configureTestMarket(vault, sm, strategy, collateral, irm);
+        } else if (hasCfg && c.morphoCollateralToken != address(0)) {
+            // REAL market from config.morpho.{collateral,oracle,irm,lltv} + config caps.
+            configuredMarket = true;
+            mockMarket = false;
+            irmAddr = c.morphoIrm;
+            collateralAddr = c.morphoCollateralToken;
+            (marketId, encodedMarketParams) = _configureRealMarket(vault, sm, strategy, c);
         }
 
         vm.stopBroadcast();
@@ -114,21 +176,90 @@ contract DeployMorphoStrategy is EnvSigner, DeployConfig {
         console.log("vault           :", vaultAddr);
         console.log("asset           :", asset);
         console.log("strategyManager :", smAddr);
-        console.log("morpho          :", morpho, useMock ? "(MOCK)" : "(real, from arg/config)");
-        if (useMock) {
-            console.log("mockIrm         :", address(irm));
-            console.log("mockCollateral  :", address(collateral));
+        console.log("morpho          :", morpho, deployedMockMorpho ? "(fresh MorphoMock)" : "(from arg/config)");
+        if (configuredMarket) {
+            console.log(mockMarket ? "market type     : MOCK/demo" : "market type     : REAL (from config)");
+            console.log(mockMarket ? "mockIrm         :" : "irm             :", irmAddr);
+            console.log(mockMarket ? "mockCollateral  :" : "collateral      :", collateralAddr);
             console.log("marketId        :");
-            console.logBytes32(Id.unwrap(mp.id()));
-            console.log("To allocate idle funds into this demo market, an ALLOCATOR runs:");
-            console.log("  vault.allocate(strategy, <encodedMarketParams>, assets)");
+            console.logBytes32(marketId);
             console.log("encodedMarketParams:");
-            console.logBytes(abi.encode(mp));
+            console.logBytes(encodedMarketParams);
+            console.log("To allocate into this market later, an ALLOCATOR runs:");
+            console.log("  vault.allocate(strategy, <encodedMarketParams>, assets)");
         } else {
-            console.log("Real Morpho: approve the IRM and set market caps before allocating.");
+            console.log("no market wired: pass mock IRM/collateral, or set config.morpho.*");
+            console.log("next steps (real market):");
+            console.log("  1. strategy.setIrmApproved(realIrm, true)");
+            console.log("  2. lift caps for the real collateral id");
+            console.log("  3. lift caps for the real market id");
+            console.log("  4. vault.allocate(strategy, abi.encode(realMarketParams), assets)");
         }
         console.log("");
         console.log("Restore Timelock-only governance later via:");
         console.log("  rm.revokeRole(rm.getScopedRole(vault, 'GOVERNANCE_ROLE'), signer)");
+    }
+
+    /// @dev Wires a REAL Morpho market from config.morpho params + config caps (mainnet path).
+    function _configureRealMarket(Vault vault, StrategyManager sm, MorphoStrategy strategy, Config memory c)
+        internal
+        returns (bytes32 marketId, bytes memory encodedMarketParams)
+    {
+        strategy.setIrmApproved(c.morphoIrm, true);
+
+        MarketParams memory mp = MarketParams({
+            loanToken: vault.asset(),
+            collateralToken: c.morphoCollateralToken,
+            oracle: c.morphoOracle,
+            irm: c.morphoIrm,
+            lltv: c.morphoLltv
+        });
+
+        bytes memory collateralIdData = abi.encode("collateralToken", c.morphoCollateralToken);
+        bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
+        sm.increaseAbsoluteCap(collateralIdData, c.morphoCollateralAbsCap);
+        sm.increaseRelativeCap(collateralIdData, c.morphoCollateralRelCap);
+        sm.increaseAbsoluteCap(marketIdData, c.morphoMarketAbsCap);
+        sm.increaseRelativeCap(marketIdData, c.morphoMarketRelCap);
+
+        encodedMarketParams = abi.encode(mp);
+        marketId = Id.unwrap(mp.id());
+    }
+
+    function _configureTestMarket(
+        Vault vault,
+        StrategyManager sm,
+        MorphoStrategy strategy,
+        address collateral,
+        address irm
+    ) internal returns (bytes32 marketId, bytes memory encodedMarketParams) {
+        strategy.setIrmApproved(irm, true);
+
+        MarketParams memory mp = MarketParams({
+            loanToken: vault.asset(),
+            collateralToken: collateral,
+            oracle: address(0),
+            irm: irm,
+            lltv: 0.86e18
+        });
+
+        bytes memory collateralIdData = abi.encode("collateralToken", collateral);
+        bytes memory marketIdData = abi.encode(address(strategy), Id.unwrap(mp.id()));
+        sm.increaseAbsoluteCap(collateralIdData, type(uint128).max);
+        sm.increaseRelativeCap(collateralIdData, WAD);
+        sm.increaseAbsoluteCap(marketIdData, type(uint128).max);
+        sm.increaseRelativeCap(marketIdData, WAD);
+
+        encodedMarketParams = abi.encode(mp);
+        marketId = Id.unwrap(mp.id());
+    }
+
+    function _deployMockIrm() internal returns (address) {
+        return address(new IrmMock());
+    }
+
+    function _deployMockCollateral() internal returns (address) {
+        // WBTC-like decimals; MorphoMock does not validate collateral semantics.
+        return address(new ERC20Mock(8));
     }
 }

@@ -7,6 +7,7 @@ import {Timelock} from "../../src/Timelock.sol";
 import {Vault} from "../../src/Vault.sol";
 import {StrategyManager} from "../../src/StrategyManager.sol";
 import {EnvSigner} from "../EnvSigner.sol";
+import {DeployConfig} from "../DeployConfig.sol";
 
 /// @notice Step 8 (OPTIONAL) — set per-(target,selector) delays on the Timelock. Default is 0 (no
 /// delay), which is fine for local/test runs; before going to production you'll want non-zero values
@@ -25,7 +26,7 @@ import {EnvSigner} from "../EnvSigner.sol";
 ///   forge script script/deploy/08_ConfigureTimelockDelays.s.sol \
 ///     --sig "run(address,address,address)" 0xTimelock 0xVault 0xStrategyManager \
 ///     --rpc-url arbitrum_sepolia --broadcast
-contract ConfigureTimelockDelays is EnvSigner {
+contract ConfigureTimelockDelays is EnvSigner, DeployConfig {
     function run(address timelockAddr, address vault, address sm) external {
         Timelock timelock = Timelock(timelockAddr);
         string memory preset = vm.envOr("DELAY_PRESET", string("test"));
@@ -34,8 +35,17 @@ contract ConfigureTimelockDelays is EnvSigner {
 
         bool isMainnet = keccak256(bytes(preset)) == keccak256(bytes("mainnet"));
 
-        // High-risk (fee / fee recipient / strategy manager link / maxRate)
+        // Delays: config.timelock.{high,medium,low}Risk when a network config exists, else DELAY_PRESET.
         uint256 highRisk = isMainnet ? 14 days : 60;
+        uint256 mediumRisk = isMainnet ? 7 days : 60;
+        uint256 lowRisk = isMainnet ? 3 days : 0;
+        if (_configAvailable()) {
+            Config memory c = _loadConfig();
+            highRisk = c.timelockHigh;
+            mediumRisk = c.timelockMedium;
+            lowRisk = c.timelockLow;
+        }
+
         timelock.increaseTimelock(vault, Vault.setWithdrawalFee.selector,        highRisk);
         timelock.increaseTimelock(vault, Vault.setDepositFee.selector,           highRisk);
         timelock.increaseTimelock(vault, Vault.setPerformanceFee.selector,       highRisk);
@@ -47,7 +57,6 @@ contract ConfigureTimelockDelays is EnvSigner {
         timelock.increaseTimelock(vault, Vault.setMaxRate.selector,              highRisk);
 
         // Medium (strategy add/remove/cap)
-        uint256 mediumRisk = isMainnet ? 7 days : 60;
         timelock.increaseTimelock(sm, StrategyManager.addStrategy.selector,                mediumRisk);
         timelock.increaseTimelock(sm, StrategyManager.removeStrategy.selector,             mediumRisk);
         timelock.increaseTimelock(sm, StrategyManager.setStrategyActive.selector,          mediumRisk);
@@ -56,7 +65,6 @@ contract ConfigureTimelockDelays is EnvSigner {
         timelock.increaseTimelock(sm, StrategyManager.setForceDeallocatePenalty.selector,  mediumRisk);
 
         // Low (metadata)
-        uint256 lowRisk = isMainnet ? 3 days : 0;
         timelock.increaseTimelock(vault, Vault.setName.selector,   lowRisk);
         timelock.increaseTimelock(vault, Vault.setSymbol.selector, lowRisk);
         timelock.increaseTimelock(vault, Vault.unpause.selector,   lowRisk);

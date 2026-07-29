@@ -7,6 +7,7 @@ import {Vault} from "../../src/Vault.sol";
 import {RoleManager} from "../../src/RoleManager.sol";
 import {WAD} from "../../src/libraries/ConstantsLib.sol";
 import {EnvSigner} from "../EnvSigner.sol";
+import {DeployConfig} from "../DeployConfig.sol";
 
 /// @notice Step 11 — set the vault's `maxRate` (per-second growth cap for `totalAssets`).
 /// Without this, `accrueInterest()` cannot credit strategy yield to `sharePrice` because the
@@ -31,12 +32,13 @@ import {EnvSigner} from "../EnvSigner.sol";
 ///     0xD408A6B5425e9866dc05F68F2c75e8F2F7495d95 \
 ///     0x52815561C58731761DBfa302d0aE160712F7b331 \
 ///     --rpc-url arbitrum_sepolia --broadcast
-contract SetMaxRate is EnvSigner {
+contract SetMaxRate is EnvSigner, DeployConfig {
     function run(address vaultAddr, address rmAddr) external {
         Vault vault = Vault(vaultAddr);
         RoleManager rm = RoleManager(rmAddr);
 
-        uint256 defaultRate = WAD / 365 days; // 100% APR
+        // MAX_RATE env > config.fees.maxRate > default (100% APR).
+        uint256 defaultRate = _configAvailable() ? _loadConfig().maxRate : WAD / 365 days;
         uint256 newRate = vm.envOr("MAX_RATE", defaultRate);
 
         address signer = _startBroadcastFromEnv();

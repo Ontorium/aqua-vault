@@ -48,15 +48,16 @@ contract DeployOffchainStrategy is EnvSigner, DeployConfig {
         RoleManager rm = RoleManager(rmAddr);
         StrategyManager sm = StrategyManager(smAddr);
 
-        // Per-network config: custodian + the offchain operator role holders (manager / reporter).
+        // Per-network config: custodian, stalePeriod, maxChangeBps, caps, operator role holders.
+        bool hasCfg = _configAvailable();
         Config memory c;
-        if (_configAvailable()) c = _loadConfig();
+        if (hasCfg) c = _loadConfig();
 
-        // Knobs (with sensible testnet defaults). custodian: CUSTODIAN env > config.custodian > signer.
+        // Knobs: env override > config value > DeployConfig default.
         address custodian = vm.envOr("CUSTODIAN", address(0));
-        if (custodian == address(0)) custodian = c.custodian;
-        uint256 stalePeriod = vm.envOr("STALE_PERIOD", uint256(1 days));
-        uint256 maxChangeBps = vm.envOr("MAX_CHANGE_BPS", uint256(1000)); // 10%
+        if (custodian == address(0)) custodian = c.custodian; // config.offchain.custodian, else signer below
+        uint256 stalePeriod = vm.envOr("STALE_PERIOD", hasCfg ? c.stalePeriod : DEFAULT_STALE_PERIOD);
+        uint256 maxChangeBps = vm.envOr("MAX_CHANGE_BPS", hasCfg ? c.maxChangeBps : DEFAULT_MAX_CHANGE_BPS);
 
         address signer = _startBroadcastFromEnv();
         if (custodian == address(0)) custodian = signer;
@@ -70,16 +71,16 @@ contract DeployOffchainStrategy is EnvSigner, DeployConfig {
         bytes32 govRole = rm.getScopedRole(vaultAddr, "GOVERNANCE_ROLE");
         if (!rm.hasRole(govRole, signer)) rm.grantRole(govRole, signer);
 
-        // 3. Register on SM (kind=2 = OFFCHAIN_NAV).
-        sm.addStrategy(address(strategy), 2, 0);
+        // 3. Register on SM (kind=2 = OFFCHAIN_NAV) with the configured target weight.
+        sm.addStrategy(address(strategy), 2, hasCfg ? c.offchainTargetBps : 0);
 
         // 4. Lift the strategy's single id cap to max. OffchainNAVStrategy's id is
         //    keccak256(abi.encode(address(strategy), asset)) — must encode in that exact order to
         //    match `strategyId()`.
         bytes memory idData = abi.encode(address(strategy), asset);
         require(keccak256(idData) == strategy.strategyId(), "strategyId encoding mismatch");
-        sm.increaseAbsoluteCap(idData, type(uint128).max);
-        sm.increaseRelativeCap(idData, WAD);
+        sm.increaseAbsoluteCap(idData, hasCfg ? c.offchainStrategyAbsCap : type(uint128).max);
+        sm.increaseRelativeCap(idData, hasCfg ? c.offchainStrategyRelCap : WAD);
 
         // 5. Grant the offchain operator roles to the config holders (scoped to the strategy address).
         //    Admin of these roles is DEFAULT_ADMIN_ROLE, which the signer holds. Skipped if config is empty.
@@ -89,6 +90,9 @@ contract DeployOffchainStrategy is EnvSigner, DeployConfig {
         if (c.offchainReporter != address(0)) {
             rm.grantRole(rm.getScopedRole(address(strategy), "OFFCHAIN_REPORTER"), c.offchainReporter);
         }
+
+        // 6. Optional skim recipient (config.strategy.skimRecipient).
+        if (hasCfg && c.skimRecipient != address(0)) strategy.setSkimRecipient(c.skimRecipient);
 
         vm.stopBroadcast();
 

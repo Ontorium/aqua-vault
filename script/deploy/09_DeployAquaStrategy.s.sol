@@ -46,13 +46,18 @@ contract DeployAquaStrategy is EnvSigner, DeployConfig {
         RoleManager rm = RoleManager(rmAddr);
         StrategyManager sm = StrategyManager(smAddr);
 
-        // Fall back to the per-network config for any address left as 0 (only reads config when needed,
-        // so a fully-specified arg invocation works on chains without a config file).
-        if (lendingPool == address(0) || aToken == address(0)) {
-            require(_configAvailable(), "Aqua: pass lendingPool+aToken, or deploy on a configured chain");
-            Config memory c = _loadConfig();
-            if (lendingPool == address(0)) lendingPool = c.aavePool;
-            if (aToken == address(0)) aToken = c.aToken;
+        // Per-network config: external addresses + strategy knobs (caps / targetBps / penalty / skim).
+        // Only read when available so a fully-specified arg invocation works on unconfigured chains.
+        bool hasCfg = _configAvailable();
+        Config memory c;
+        if (hasCfg) c = _loadConfig();
+        if (lendingPool == address(0)) {
+            require(hasCfg, "Aqua: pass lendingPool, or deploy on a configured chain");
+            lendingPool = c.aavePool;
+        }
+        if (aToken == address(0)) {
+            require(hasCfg, "Aqua: pass aToken, or deploy on a configured chain");
+            aToken = c.aToken;
         }
 
         address signer = _startBroadcastFromEnv();
@@ -66,18 +71,23 @@ contract DeployAquaStrategy is EnvSigner, DeployConfig {
         bytes32 govRole = rm.getScopedRole(vaultAddr, "GOVERNANCE_ROLE");
         rm.grantRole(govRole, signer);
 
-        // 3. Register strategy (kind=1: ONCHAIN, targetBps=0). The per-id caps below bound flow.
-        sm.addStrategy(address(strategy), 1, 0);
+        // 3. Register strategy (kind=1: ONCHAIN) with the configured target weight.
+        sm.addStrategy(address(strategy), 1, hasCfg ? c.aquaTargetBps : 0);
 
         // 4. Lift caps for both ids the strategy emits: the strategy id (strategy-level aggregate)
-        //    and the aToken id (cross-strategy aggregate per aToken). Both must permit flow or
-        //    allocate() reverts on the smaller of the two.
+        //    and the aToken id (cross-strategy aggregate per aToken). Uses config caps (default max/WAD).
         bytes memory strategyIdData = abi.encode("AquaStrategy", address(strategy));
         bytes memory aTokenIdData = abi.encode("aToken", aToken);
-        sm.increaseAbsoluteCap(strategyIdData, type(uint128).max);
-        sm.increaseRelativeCap(strategyIdData, WAD);
-        sm.increaseAbsoluteCap(aTokenIdData, type(uint128).max);
-        sm.increaseRelativeCap(aTokenIdData, WAD);
+        sm.increaseAbsoluteCap(strategyIdData, hasCfg ? c.aquaStrategyAbsCap : type(uint128).max);
+        sm.increaseRelativeCap(strategyIdData, hasCfg ? c.aquaStrategyRelCap : WAD);
+        sm.increaseAbsoluteCap(aTokenIdData, hasCfg ? c.aquaATokenAbsCap : type(uint128).max);
+        sm.increaseRelativeCap(aTokenIdData, hasCfg ? c.aquaATokenRelCap : WAD);
+
+        // 5. Optional: force-deallocate penalty (config.fees) + skim recipient (config.strategy).
+        if (hasCfg && c.forceDeallocatePenalty > 0) {
+            sm.setForceDeallocatePenalty(address(strategy), c.forceDeallocatePenalty);
+        }
+        if (hasCfg && c.skimRecipient != address(0)) strategy.setSkimRecipient(c.skimRecipient);
 
         vm.stopBroadcast();
 

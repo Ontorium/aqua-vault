@@ -1,0 +1,41 @@
+{
+  "_comment": "Per-network deploy config — Arbitrum Sepolia (421614). Only INTENTIONAL overrides are listed; omitted keys fall back to DeployConfig.DEFAULT_* (fees/penalty/targetBps -> 0, caps -> absolute=uint128.max & relative=1e18, gates -> 0x0, maxRate -> ~100% APR, stalePeriod -> 1d, maxChangeBps -> 10%, timelock -> 60/60/0). Morpho left unset -> per-run MOCK. Deployer/owner+governance come from the signer/Timelock.",
+
+  "roles": {
+    "curator": "0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11",
+    "sentinel": "0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11",
+    "allocator": "0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11",
+    "offchainManager": "0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11",
+    "offchainReporter": "0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11"
+  },
+
+  "fees": {
+    "depositFee": "1000000000000000",
+    "withdrawalFee": "1000000000000000",
+    "performanceFee": "100000000000000000",
+    "forceDeallocatePenalty": "5000000000000000",
+    "protocolFeeRecipient": "0x066e6168b4cA035Ae7B9f72608d4804836CF7E32",
+    "performanceFeeRecipient": "0x066e6168b4cA035Ae7B9f72608d4804836CF7E32",
+    "managementFeeRecipient": "0x066e6168b4cA035Ae7B9f72608d4804836CF7E32"
+  },
+  "caps": {
+    "morphoStrategy": { "relative": "400000000000000000" },
+    "morphoCollateral": { "relative": "600000000000000000" },
+    "morphoMarket": { "relative": "300000000000000000" }
+  },
+
+  "strategy": {
+    "aquaTargetBps": "3000",
+    "morphoTargetBps": "4000",
+    "offchainTargetBps": "3000",
+    "skimRecipient": "0x8888888888888888888888888888888888888888"
+  },
+
+  "offchain": {
+    "custodian": "0x0eD039d012B6c241e1636af8A0d2B6eC8c972b11"
+  },
+
+  "external": {
+    "asset": "0xC3437DA5e936D3449D6F0700A71847305e9357Be"
+  }
+}

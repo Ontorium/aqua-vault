@@ -12,6 +12,7 @@ via_ir = true
 fs_permissions = [
     { access = "read-write", path = "./reports" },
     { access = "read", path = "./broadcast" },
+    { access = "read", path = "./config" },
 ]
 # Default `forge test` skips fork-mode integration tests — they depend on live testnet state and
 # can break when accumulated balances drift. Run them explicitly via:
@@ -23,9 +24,13 @@ no_match_path = "test/fork/**"
 # Run fork tests explicitly with: FOUNDRY_PROFILE=fork forge test
 [profile.fork]
 match_path = "test/fork/**"
+# Override the default profile's `no_match_path = "test/fork/**"` (inherited), which would otherwise
+# exclude every fork test and make `forge test` silently find zero tests.
+no_match_path = "test/_none_.sol"
 
 [rpc_endpoints]
 arbitrum_sepolia = "${ARBITRUM_SEPOLIA_RPC_URL}"
+arbitrum = "${ARBITRUM_RPC_URL}"
 
 [etherscan]
 arbitrum_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 421614, url = "https://api.etherscan.io/v2/api?chainid=421614" }
